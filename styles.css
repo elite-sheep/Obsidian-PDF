@@ -142,7 +142,55 @@
   animation: lpa-flash 1.1s ease;
 }
 
-/* Edit popover note fields (native mode has no margin cards). */
+/* Margin rails overlaid on the native viewer. The container is pinned to the
+   native scroll area's box by JS (so the PDF thumbnail sidebar and toolbar are
+   never covered); the rails reuse the custom view's .lpa-margin /
+   .lpa-margin-card styling. Only the cards accept pointer events — scrolling,
+   selection, and clicks pass through everywhere else. */
+.lpa-native-margins {
+  position: absolute;
+  z-index: 30;
+  pointer-events: none;
+  overflow: hidden;
+}
+.lpa-native-margins .lpa-connection-layer {
+  overflow: hidden;
+}
+.lpa-native-margins .lpa-margin {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  pointer-events: none;
+}
+.lpa-native-margins .lpa-margin-left {
+  left: 0;
+}
+.lpa-native-margins .lpa-margin-right {
+  right: 0;
+}
+.lpa-native-margins .lpa-margin-card {
+  pointer-events: auto;
+}
+.lpa-native-margins .lpa-margin.is-collapsed .lpa-margin-card {
+  pointer-events: none;
+}
+/* While the native viewer scrolls, cards must track their anchors instantly
+   (mirrors the .lpa-body.is-scrolling rules of the custom view). */
+.lpa-native-margins.is-scrolling .lpa-margin-card {
+  transition:
+    width 120ms ease,
+    max-height 160ms ease,
+    border-color 120ms ease,
+    transform 120ms ease,
+    opacity 120ms ease,
+    box-shadow 120ms ease;
+}
+.lpa-native-margins.is-scrolling .lpa-connection-line,
+.lpa-native-margins.is-scrolling .lpa-connection-dot {
+  transition: none;
+}
+
+/* Edit popover note fields (marks without side cards are edited here). */
 .lpa-native-edit-popover {
   width: 264px;
 }
