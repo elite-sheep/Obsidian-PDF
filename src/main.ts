@@ -142,7 +142,7 @@ export default class LocalPdfAnnotatorPlugin extends Plugin {
       state: { file: file.path },
       active: true,
     });
-    await this.app.workspace.revealLeaf(leaf);
+    this.app.workspace.setActiveLeaf(leaf, { focus: true });
   }
 
   private findExistingLeafForFile(file: TFile): WorkspaceLeaf | null {
