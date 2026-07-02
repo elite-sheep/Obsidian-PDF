@@ -9,25 +9,30 @@ portable.
 
 ## Features
 
-- Read PDFs inside Obsidian with a bundled, pinned `pdf.js` worker.
+- Annotate inside Obsidian's native PDF viewer without replacing its toolbar,
+  sidebar, zoom, or page navigation.
+- Keep the original bundled `pdf.js` annotator view available as a stable
+  fallback.
 - Select text without creating anything by accident.
 - Use the contextual selection popup to create either:
   - a highlight only, or
-  - an annotation with a highlight and a margin note card.
+  - an annotation with a highlight and note.
 - Keep text crisp: highlight color is painted behind selectable PDF text.
 - View annotation cards in left and right margins at the level of their source
-  passage.
-- Search highlights, notes, and page tags in the horizontal Annotations row.
+  passage in the fallback annotator view.
+- Search highlights, notes, and page tags from the annotation list.
 - Add page-level tags for notes that are not tied to a text selection.
 - Move margin cards between left and right margins.
 - Import legacy `obsidian-annotator` highlights for the current PDF.
 
 ## Opening PDFs
 
-PDF Annotator is always available from:
+Open a PDF normally in Obsidian. The native PDF toolbar gets an **Annotate**
+toggle. Turning it on layers annotation tools onto the current native PDF view,
+without opening a duplicate tab or replacing the page.
 
-- File explorer: right-click a `.pdf` file and choose **Annotate**.
-- Command palette: run **Open current PDF in annotator**.
+The command palette action **Open current PDF in annotator** remains available
+as a stable fallback for the custom PDF Annotator view.
 
 You can also make it the default PDF viewer from plugin settings. This redirects
 ordinary `.pdf` clicks into PDF Annotator. The setting is opt-in for fresh
@@ -35,15 +40,15 @@ installs.
 
 ## Basic Use
 
-1. Open a PDF in PDF Annotator.
-2. Drag-select text. Selection alone creates nothing.
-3. Move to the slim handle at the end of the selection until the action popup
-   opens.
-4. Choose **Highlight** to save only a text mark.
-5. Choose **Annotate** to save a text mark plus a margin note card.
-6. Use **Tag** in the top-right controls to place a page note at a specific
+1. Open a PDF normally in Obsidian.
+2. Click **Annotate** in the native PDF toolbar.
+3. Drag-select text. Selection alone creates nothing.
+4. Use the selection popup when it opens.
+5. Choose **Highlight** to save only a text mark.
+6. Choose **Annotate** to save a text mark plus a note.
+7. Use the note button in the toolbar to place a page note at a specific
    location on the PDF.
-7. Use **Annotations** to open the searchable horizontal annotation row.
+8. Use the list button in the toolbar to open searchable annotations.
 
 ## Data Format
 

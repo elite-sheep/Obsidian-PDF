@@ -2,27 +2,34 @@
  * main.ts — PDF Annotator plugin entry point.
  *
  * Triggers (all public, documented API):
- *   - file-menu "Annotate" item on .pdf files
- *   - command "Open current PDF in annotator"
+ *   - command "Open current PDF in annotator" (stable custom-view fallback)
  *   - file-open bridge: ordinary .pdf clicks are redirected into this view
+ *   - native overlay (experimental): an "Annotate" toggle injected into the
+ *     native PDF view's toolbar layers annotation tools onto Obsidian's own
+ *     viewer without replacing it (see native-overlay.ts)
  */
 import { Plugin, TFile, WorkspaceLeaf, Notice, PluginSettingTab, Setting } from "obsidian";
 import { PdfAnnotatorView, VIEW_TYPE_PDF_ANNOTATOR } from "./view";
 import { initPdfEngine, disposePdfEngine, LOG_TAG } from "./pdf-engine";
+import { NativeOverlayManager } from "./native-overlay";
 
 interface LpaSettings {
   /** Override Obsidian's core PDF viewer so clicking a PDF opens this view. */
   registerAsDefaultPdfHandler: boolean;
+  /** Inject annotation mode into the native PDF view (experimental). */
+  enableNativeOverlay: boolean;
 }
 
 const DEFAULT_SETTINGS: LpaSettings = {
   registerAsDefaultPdfHandler: false,
+  enableNativeOverlay: true,
 };
 
 export default class LocalPdfAnnotatorPlugin extends Plugin {
   settings!: LpaSettings;
+  nativeOverlays!: NativeOverlayManager;
   private replacingCorePdfView = false;
-  private nativeModeButtonRaf: number | null = null;
+  private nativePdfRefreshRaf: number | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -39,21 +46,9 @@ export default class LocalPdfAnnotatorPlugin extends Plugin {
       (leaf: WorkspaceLeaf) => new PdfAnnotatorView(leaf)
     );
 
-    // Trigger 1: file-menu "Annotate" on .pdf files.
-    this.registerEvent(
-      this.app.workspace.on("file-menu", (menu, file) => {
-        if (file instanceof TFile && file.extension === "pdf") {
-          menu.addItem((item) =>
-            item
-              .setTitle("Annotate")
-              .setIcon("highlighter")
-              .onClick(() => this.openInAnnotator(file, "tab"))
-          );
-        }
-      })
-    );
+    this.nativeOverlays = new NativeOverlayManager(this, () => this.settings.enableNativeOverlay);
 
-    // Trigger 2: command palette.
+    // Trigger 1: command palette.
     this.addCommand({
       id: "open-current-pdf-in-annotator",
       name: "Open current PDF in annotator",
@@ -65,36 +60,57 @@ export default class LocalPdfAnnotatorPlugin extends Plugin {
       },
     });
 
+    // Toggle the experimental annotation overlay on the native PDF view.
+    this.addCommand({
+      id: "toggle-native-annotation-mode",
+      name: "Toggle annotation mode on the native PDF view",
+      checkCallback: (checking: boolean) => {
+        if (!this.settings.enableNativeOverlay) return false;
+        const leaf = this.app.workspace.activeLeaf;
+        const ready = !!leaf && leaf.view.getViewType() === "pdf";
+        if (ready && !checking) void this.nativeOverlays.toggle(leaf!);
+        return ready;
+      },
+    });
+
     // Migrate highlights from the old obsidian-annotator notes for the open PDF.
+    // Works in the custom annotator view AND in native overlay mode.
     this.addCommand({
       id: "import-legacy-annotations",
       name: "Import legacy obsidian-annotator highlights for this PDF",
       checkCallback: (checking: boolean) => {
         const view = this.app.workspace.getActiveViewOfType(PdfAnnotatorView);
-        const ready = !!view && !!view.file;
-        if (ready && !checking) void view!.importLegacyAnnotations();
-        return ready;
+        if (view && view.file) {
+          if (!checking) void view.importLegacyAnnotations();
+          return true;
+        }
+        const overlay = this.nativeOverlays.activeOverlay();
+        if (overlay) {
+          if (!checking) void overlay.importLegacyAnnotations();
+          return true;
+        }
+        return false;
       },
     });
 
-    // Trigger 3: ordinary file clicks. Obsidian's core PDF view owns the "pdf"
+    // Trigger 2: ordinary file clicks. Obsidian's core PDF view owns the "pdf"
     // extension, so registerExtensions cannot override it safely. Instead, use
     // the public file-open event and replace the active core PDF leaf.
     this.registerEvent(
       this.app.workspace.on("file-open", (file) => {
-        this.scheduleNativePdfModeButtonRefresh();
+        this.scheduleNativePdfRefresh();
         if (file instanceof TFile && file.extension === "pdf") {
           void this.openPdfClickInAnnotator(file);
         }
       })
     );
     this.registerEvent(
-      this.app.workspace.on("active-leaf-change", () => this.scheduleNativePdfModeButtonRefresh())
+      this.app.workspace.on("active-leaf-change", () => this.scheduleNativePdfRefresh())
     );
     this.registerEvent(
-      this.app.workspace.on("layout-change", () => this.scheduleNativePdfModeButtonRefresh())
+      this.app.workspace.on("layout-change", () => this.scheduleNativePdfRefresh())
     );
-    this.app.workspace.onLayoutReady(() => this.scheduleNativePdfModeButtonRefresh());
+    this.app.workspace.onLayoutReady(() => this.scheduleNativePdfRefresh());
 
     this.addSettingTab(new LpaSettingTab(this));
 
@@ -102,12 +118,13 @@ export default class LocalPdfAnnotatorPlugin extends Plugin {
   }
 
   onunload(): void {
-    if (this.nativeModeButtonRaf !== null) {
-      window.cancelAnimationFrame(this.nativeModeButtonRaf);
-      this.nativeModeButtonRaf = null;
+    if (this.nativePdfRefreshRaf !== null) {
+      window.cancelAnimationFrame(this.nativePdfRefreshRaf);
+      this.nativePdfRefreshRaf = null;
     }
-    this.removeNativeModeButtons();
-    // Tear down our views first (cancels pdf.js tasks, destroys docs) …
+    // Detach native overlays (removes injected DOM, observers, listeners) …
+    this.nativeOverlays.disable();
+    // … tear down our views (cancels pdf.js tasks, destroys docs) …
     this.app.workspace.getLeavesOfType(VIEW_TYPE_PDF_ANNOTATOR).forEach((leaf) => leaf.detach());
     // … then revoke the worker Blob URL.
     disposePdfEngine();
@@ -115,12 +132,37 @@ export default class LocalPdfAnnotatorPlugin extends Plugin {
   }
 
   async openInAnnotator(file: TFile, paneType: "tab" | "split" | false = "tab"): Promise<void> {
-    const leaf = this.app.workspace.getLeaf(paneType);
+    const leaf = this.findExistingLeafForFile(file) ?? this.app.workspace.getLeaf(paneType);
+    await this.setLeafToAnnotator(leaf, file);
+  }
+
+  private async setLeafToAnnotator(leaf: WorkspaceLeaf, file: TFile): Promise<void> {
     await leaf.setViewState({
       type: VIEW_TYPE_PDF_ANNOTATOR,
       state: { file: file.path },
       active: true,
     });
+    await this.app.workspace.revealLeaf(leaf);
+  }
+
+  private findExistingLeafForFile(file: TFile): WorkspaceLeaf | null {
+    const activeLeaf = this.app.workspace.activeLeaf;
+    if (activeLeaf && this.leafContainsFile(activeLeaf, file)) {
+      return activeLeaf;
+    }
+
+    for (const viewType of ["pdf", VIEW_TYPE_PDF_ANNOTATOR]) {
+      for (const leaf of this.app.workspace.getLeavesOfType(viewType)) {
+        if (this.leafContainsFile(leaf, file)) return leaf;
+      }
+    }
+
+    return null;
+  }
+
+  private leafContainsFile(leaf: WorkspaceLeaf, file: TFile): boolean {
+    const leafFile = (leaf.view as { file?: unknown }).file;
+    return leafFile instanceof TFile && leafFile.path === file.path;
   }
 
   private async openPdfClickInAnnotator(file: TFile): Promise<void> {
@@ -139,11 +181,7 @@ export default class LocalPdfAnnotatorPlugin extends Plugin {
 
       this.replacingCorePdfView = true;
       try {
-        await leaf.setViewState({
-          type: VIEW_TYPE_PDF_ANNOTATOR,
-          state: { file: file.path },
-          active: true,
-        });
+        await this.setLeafToAnnotator(leaf, file);
       } finally {
         this.replacingCorePdfView = false;
       }
@@ -151,46 +189,14 @@ export default class LocalPdfAnnotatorPlugin extends Plugin {
     }
   }
 
-  private scheduleNativePdfModeButtonRefresh(): void {
-    if (this.nativeModeButtonRaf !== null) return;
-    this.nativeModeButtonRaf = window.requestAnimationFrame(() => {
-      this.nativeModeButtonRaf = null;
-      this.refreshNativePdfModeButtons();
+  /** Debounced sync of the native-PDF-view integration (toolbar controls +
+   * overlay lifecycle). The overlay itself never calls setViewState. */
+  private scheduleNativePdfRefresh(): void {
+    if (this.nativePdfRefreshRaf !== null) return;
+    this.nativePdfRefreshRaf = window.requestAnimationFrame(() => {
+      this.nativePdfRefreshRaf = null;
+      this.nativeOverlays.refresh();
     });
-  }
-
-  private refreshNativePdfModeButtons(): void {
-    this.removeNativeModeButtons();
-    for (const leaf of this.app.workspace.getLeavesOfType("pdf")) {
-      const file = (leaf.view as { file?: unknown }).file;
-      if (!(file instanceof TFile) || file.extension !== "pdf") continue;
-
-      const actionsEl = leaf.view.containerEl.querySelector<HTMLElement>(
-        ".view-header .view-actions, .view-actions"
-      );
-      if (!actionsEl) continue;
-
-      const btn = actionsEl.createEl("button", {
-        cls: "lpa-native-mode-button",
-        text: "Annotate: Off",
-        attr: {
-          type: "button",
-          "aria-label": "Annotation mode is off. Open this PDF in the annotator.",
-          title: "Annotation mode is off. Open in annotator.",
-        },
-      }) as HTMLButtonElement;
-      btn.onclick = (evt) => {
-        evt.preventDefault();
-        evt.stopPropagation();
-        void this.openInAnnotator(file, "tab");
-      };
-    }
-  }
-
-  private removeNativeModeButtons(): void {
-    this.app.workspace.containerEl
-      .querySelectorAll<HTMLElement>(".lpa-native-mode-button")
-      .forEach((button) => button.remove());
   }
 
   async loadSettings(): Promise<void> {
@@ -212,6 +218,22 @@ class LpaSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     new Setting(containerEl)
+      .setName("Annotate inside the native PDF view (experimental)")
+      .setDesc(
+        "Adds an “Annotate” toggle to Obsidian's own PDF toolbar. Annotation tools are layered " +
+          "onto the native viewer — its toolbar, sidebar, zoom, and navigation stay untouched. " +
+          "Uses the same sidecar files as the annotator view."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.enableNativeOverlay).onChange(async (v) => {
+          this.plugin.settings.enableNativeOverlay = v;
+          await this.plugin.saveSettings();
+          if (v) this.plugin.nativeOverlays.refresh();
+          else this.plugin.nativeOverlays.disable();
+        })
+      );
+
+    new Setting(containerEl)
       .setName("Make this the default PDF viewer")
       .setDesc(
         "When enabled, ordinary .pdf clicks are redirected into this annotator. " +
@@ -228,7 +250,7 @@ class LpaSettingTab extends PluginSettingTab {
     containerEl.createEl("p", {
       cls: "setting-item-description",
       text:
-        "Always available: right-click a PDF → “Annotate”, or use the command “Open current PDF in annotator”.",
+        "The command “Open current PDF in annotator” remains available as a stable custom-view fallback.",
     });
   }
 }

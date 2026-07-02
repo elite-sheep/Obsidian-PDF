@@ -79,23 +79,202 @@
   outline: none;
 }
 
-.lpa-native-mode-button {
-  height: 24px;
-  margin-inline-start: 4px;
-  padding: 0 8px;
-  border: 0.5px solid color-mix(in srgb, var(--background-modifier-border) 70%, transparent);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--background-primary) 86%, transparent);
+/* ===== Native PDF view annotation overlay (experimental) ====================
+   Injected into Obsidian's OWN pdf view (view type "pdf"): a control group in
+   the native toolbar plus per-page overlay layers (which reuse the
+   .lpa-highlight-layer / .lpa-note-layer plumbing below). Everything here is
+   namespaced lpa-native-* and removed when annotation mode is toggled off, the
+   leaf changes file, or the plugin unloads. */
+.lpa-native-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.pdf-toolbar .lpa-native-controls {
+  margin-inline-start: 6px;
+  padding-inline-start: 6px;
+  border-inline-start: 1px solid color-mix(in srgb, var(--background-modifier-border) 80%, transparent);
+}
+.view-actions .lpa-native-controls {
+  margin-inline-end: 4px;
+}
+.lpa-native-controls button.clickable-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
   color: var(--text-muted);
+}
+.lpa-native-controls button.clickable-icon:hover {
+  color: var(--text-normal);
+}
+.lpa-native-controls button.clickable-icon.is-active {
+  color: var(--interactive-accent);
+  background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+}
+.lpa-native-toggle-label {
   font-size: 11px;
   line-height: 1;
-  white-space: nowrap;
+}
+.lpa-native-count {
+  min-width: 16px;
+  margin-inline-start: 2px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: var(--background-modifier-hover);
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.4;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Tag placement mode: crosshair over the native pages. */
+.lpa-native-tag-mode .page[data-page-number] {
+  cursor: crosshair;
+}
+
+/* Tags sit above the native text layer; keep clicks working there. */
+.lpa-native-note-layer {
+  z-index: 5;
+}
+.lpa-page-tag.lpa-flash {
+  animation: lpa-flash 1.1s ease;
+}
+
+/* Edit popover note fields (native mode has no margin cards). */
+.lpa-native-edit-popover {
+  width: 264px;
+}
+.lpa-native-popover-source {
+  padding: 2px 2px 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-faint);
+  border-left: 2px solid var(--background-modifier-border);
+  padding-left: 6px;
+}
+.lpa-native-note {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 5px 7px;
+}
+.lpa-native-note:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--interactive-accent) 55%, var(--background-modifier-border));
+}
+
+/* Annotation list panel inside the native view. */
+.workspace-leaf-content[data-type="pdf"] .view-content {
+  position: relative;
+}
+.lpa-native-roll {
+  position: absolute;
+  top: 44px;
+  right: 12px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  width: 300px;
+  max-height: min(440px, 72%);
+  padding: 8px;
+  gap: 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-primary);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
+}
+.lpa-native-roll-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.lpa-native-roll-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+.lpa-native-roll-meta {
+  flex: 1;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.lpa-native-roll-close {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
   cursor: pointer;
 }
-.lpa-native-mode-button:hover {
-  border-color: color-mix(in srgb, var(--interactive-accent) 45%, var(--background-modifier-border));
-  background: color-mix(in srgb, var(--interactive-accent) 10%, var(--background-primary));
+.lpa-native-roll-close:hover {
   color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+.lpa-native-roll-search {
+  width: 100%;
+  height: 26px;
+  font-size: 12px;
+}
+.lpa-native-roll-list {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.lpa-native-roll-empty {
+  padding: 10px 4px;
+  font-size: 12px;
+  color: var(--text-faint);
+  text-align: center;
+}
+.lpa-native-roll-item {
+  padding: 5px 7px;
+  border: 0.5px solid color-mix(in srgb, var(--background-modifier-border) 75%, transparent);
+  border-left: 2px solid var(--lpa-accent, var(--interactive-accent));
+  border-radius: 6px;
+  cursor: pointer;
+}
+.lpa-native-roll-item:hover {
+  background: var(--background-modifier-hover);
+}
+.lpa-native-roll-item-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+.lpa-native-roll-page {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.lpa-native-roll-kind {
+  font-size: 10px;
+  color: var(--text-faint);
+}
+.lpa-native-roll-text {
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text-normal);
+}
+.lpa-native-roll-source {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--text-faint);
 }
 .lpa-zoom-label {
   min-width: 48px;
