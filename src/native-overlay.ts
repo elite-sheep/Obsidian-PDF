@@ -19,8 +19,9 @@
  *  - Margin note cards (the custom view's side-annotation UX) live in a
  *    ".lpa-native-margins" overlay pinned to the native scroller's box: cards
  *    are anchored beside the visible pages and re-laid-out on scroll, resize,
- *    zoom, and native re-renders. Nothing about the native layout is changed;
- *    only the cards themselves accept pointer events.
+ *    zoom, and native re-renders. When an active annotation has no readable
+ *    rail, the overlay clicks native zoom-out instead of drawing cards over the
+ *    page.
  *  - Everything injected is namespaced "lpa-native-*" and removed when the
  *    mode is toggled off, the leaf changes file or closes, or the plugin
  *    unloads.
@@ -55,8 +56,12 @@ const OWN_DOM_SELECTOR =
   ".lpa-native-hl-layer, .lpa-native-note-layer, .lpa-native-roll, .lpa-native-controls, .lpa-native-margins";
 /** Below this rail width cards are unreadable — skip the side entirely. */
 const RAIL_HIDE_WIDTH = 42;
+/** Below this, activating a mark asks native PDF zoom to create readable margin. */
+const RAIL_READABLE_WIDTH = 156;
 /** Keep right-rail cards clear of the native scrollbar. */
 const RAIL_SCROLLBAR_GUTTER = 14;
+const RAIL_AUTO_ZOOM_MAX_STEPS = 5;
+const RAIL_AUTO_ZOOM_SETTLE_MS = 170;
 
 interface PageGeom {
   vp1: any; // pdf.js viewport at scale 1 (the page's own /Rotate applied)
@@ -316,6 +321,7 @@ export class NativePdfOverlay {
   private scroller: HTMLElement | null = null;
   private railWidths = { left: 0, right: 0 };
   private railRaf: number | null = null;
+  private railAutoZoomToken = 0;
   private pointerRaf: number | null = null;
   private lastPointer: { x: number; y: number; pageEl: HTMLElement | null } | null = null;
   private hoverId: string | null = null;
@@ -430,6 +436,7 @@ export class NativePdfOverlay {
       win.clearTimeout(this.scrollSettleTimer);
       this.scrollSettleTimer = null;
     }
+    this.railAutoZoomToken++;
     this.marginsEl?.remove();
     this.marginsEl = null;
     this.leftRailEl = null;
@@ -1016,7 +1023,11 @@ export class NativePdfOverlay {
   private onClick(evt: MouseEvent): void {
     if (this.destroyed || !this.store) return;
     const target = evt.target as HTMLElement | null;
-    if (target?.closest(".lpa-page-tag, .lpa-native-controls, .lpa-native-roll, .lpa-mark-popover, .lpa-selection-popover, .lpa-native-margins")) {
+    if (
+      target?.closest(
+        ".pdf-toolbar, .lpa-page-tag, .lpa-native-controls, .lpa-native-roll, .lpa-mark-popover, .lpa-selection-popover, .lpa-native-margins"
+      )
+    ) {
       return;
     }
     if (this.tagMode) {
@@ -1092,6 +1103,7 @@ export class NativePdfOverlay {
     if (!store || !initial) return;
     this.closeEditPopover();
     this.setActiveAnnotation(id);
+    void this.ensureReadableRailForAnnotation(id);
     const root = this.contentRoot;
     if (!root) return;
     const doc = root.ownerDocument;
@@ -1178,13 +1190,13 @@ export class NativePdfOverlay {
       repaint();
     };
 
-    const cjk = pop.createEl("textarea", {
-      cls: "lpa-native-note lpa-native-note-cjk",
-      attr: { placeholder: "CJK note", rows: "2", "aria-label": "Secondary CJK annotation" },
+    const sideNote = pop.createEl("textarea", {
+      cls: "lpa-native-note lpa-native-side-note",
+      attr: { placeholder: "Side note", rows: "2", "aria-label": "Side note" },
     });
-    cjk.value = initial.noteContentCJK ?? "";
-    cjk.oninput = () => {
-      store.update(id, { noteContentCJK: cjk.value.trim() ? cjk.value : undefined });
+    sideNote.value = initial.noteContentCJK ?? "";
+    sideNote.oninput = () => {
+      store.update(id, { noteContentCJK: sideNote.value.trim() ? sideNote.value : undefined });
       this.notifyStoreChanged();
     };
 
@@ -1323,6 +1335,134 @@ export class NativePdfOverlay {
     return this.scroller ?? root;
   }
 
+  private async ensureReadableRailForAnnotation(id: string): Promise<void> {
+    const store = this.store;
+    const first = store?.get(id);
+    if (!store || !first) return;
+    const token = ++this.railAutoZoomToken;
+    if (!this.geoms.has(first.page)) {
+      await this.ensureGeom(first.page);
+    }
+
+    for (let step = 0; step < RAIL_AUTO_ZOOM_MAX_STEPS; step++) {
+      if (this.destroyed || this.activeId !== id || token !== this.railAutoZoomToken) return;
+      const measure = this.measureAnnotationRail(id);
+      if (!measure) return;
+      if (measure.width >= RAIL_READABLE_WIDTH) {
+        this.scheduleRailLayout();
+        return;
+      }
+
+      const zoomOut = this.findNativeZoomOutControl();
+      if (!zoomOut || this.isDisabledControl(zoomOut)) {
+        this.scheduleRailLayout();
+        return;
+      }
+
+      zoomOut.click();
+      await this.waitForRailAutoZoomSettle();
+    }
+    this.scheduleRailLayout();
+  }
+
+  private measureAnnotationRail(id: string): { side: "left" | "right"; width: number } | null {
+    const root = this.contentRoot;
+    const store = this.store;
+    const h = store?.get(id);
+    if (!root || !store || !h) return null;
+
+    const rootRect = root.getBoundingClientRect();
+    const scroller = this.findScroller() ?? root;
+    const areaRect = scroller === root ? rootRect : scroller.getBoundingClientRect();
+    if (areaRect.width < 60 || areaRect.height < 60) return null;
+
+    let pageLeft = Infinity;
+    let pageRight = -Infinity;
+    let target: { box: DOMRect; geom: PageGeom } | null = null;
+    for (const b of this.collectPageBoxes()) {
+      if (b.box.bottom <= areaRect.top || b.box.top >= areaRect.bottom) continue;
+      pageLeft = Math.min(pageLeft, b.box.left);
+      pageRight = Math.max(pageRight, b.box.right);
+      if (b.idx !== h.page) continue;
+      const geom = this.geoms.get(b.idx);
+      if (geom && aspectMatches(b.box, geom)) target = { box: b.box, geom };
+    }
+    if (!Number.isFinite(pageLeft) || !Number.isFinite(pageRight) || !target) return null;
+
+    const naturalLeftWidth = Math.max(0, pageLeft - areaRect.left);
+    const naturalRightWidth = Math.max(0, areaRect.right - RAIL_SCROLLBAR_GUTTER - pageRight);
+    this.railWidths = { left: naturalLeftWidth, right: naturalRightWidth };
+
+    const anchor = this.computeNativeAnchor(h, target.box, target.geom, areaRect);
+    if (!anchor) return null;
+    return {
+      side: anchor.side,
+      width: anchor.side === "left" ? naturalLeftWidth : naturalRightWidth,
+    };
+  }
+
+  private findNativeZoomOutControl(): HTMLElement | null {
+    const container = this.leaf.view.containerEl;
+    const toolbar = container.querySelector<HTMLElement>(".pdf-toolbar") ?? container;
+    const raw = Array.from(
+      toolbar.querySelectorAll<HTMLElement>("button, [role='button'], .clickable-icon, [aria-label], [title]")
+    );
+    const candidates: HTMLElement[] = [];
+    for (const el of raw) {
+      if (el.closest(".lpa-native-controls")) continue;
+      const clickable = el.closest<HTMLElement>("button, [role='button'], .clickable-icon") ?? el;
+      if (!toolbar.contains(clickable) || clickable.closest(".lpa-native-controls")) continue;
+      if (!candidates.includes(clickable)) candidates.push(clickable);
+    }
+
+    const direct = candidates.find((el) => this.isZoomOutLabel(this.controlLabel(el)));
+    if (direct) return direct;
+
+    const zoomInIdx = candidates.findIndex((el) => this.isZoomInLabel(this.controlLabel(el)));
+    if (zoomInIdx > 0) return candidates[zoomInIdx - 1] ?? null;
+    return null;
+  }
+
+  private controlLabel(el: HTMLElement): string {
+    const svg = el.querySelector<SVGElement>("svg");
+    return [
+      el.getAttribute("aria-label"),
+      el.getAttribute("title"),
+      el.getAttribute("data-tooltip"),
+      el.textContent,
+      el.className,
+      svg?.getAttribute("aria-label"),
+      svg?.getAttribute("class"),
+      svg?.getAttribute("data-icon"),
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+  }
+
+  private isZoomOutLabel(label: string): boolean {
+    return /zoom\s*out|zoom-out|缩小|縮小|minus/.test(label);
+  }
+
+  private isZoomInLabel(label: string): boolean {
+    return /zoom\s*in|zoom-in|放大|plus/.test(label);
+  }
+
+  private isDisabledControl(el: HTMLElement): boolean {
+    return !!el.closest("[disabled], [aria-disabled='true'], .is-disabled, .mod-disabled");
+  }
+
+  private waitForRailAutoZoomSettle(): Promise<void> {
+    const win = this.contentRoot?.ownerDocument.defaultView ?? window;
+    return new Promise((resolve) => {
+      win.setTimeout(() => {
+        this.scheduleSync();
+        this.scheduleRailLayout();
+        resolve();
+      }, RAIL_AUTO_ZOOM_SETTLE_MS);
+    });
+  }
+
   private layoutRail(): void {
     if (this.destroyed) return;
     const root = this.contentRoot;
@@ -1378,11 +1518,11 @@ export class NativePdfOverlay {
       return;
     }
 
-    const leftWidth = Math.max(0, pageLeft - areaRect.left);
-    const rightWidth = Math.max(0, areaRect.right - RAIL_SCROLLBAR_GUTTER - pageRight);
-    this.railWidths = { left: leftWidth, right: rightWidth };
-    this.applyRailWidth(this.leftRailEl, leftWidth);
-    this.applyRailWidth(this.rightRailEl, rightWidth);
+    const naturalLeftWidth = Math.max(0, pageLeft - areaRect.left);
+    const naturalRightWidth = Math.max(0, areaRect.right - RAIL_SCROLLBAR_GUTTER - pageRight);
+    this.railWidths = { left: naturalLeftWidth, right: naturalRightWidth };
+    this.applyRailWidth(this.leftRailEl, naturalLeftWidth);
+    this.applyRailWidth(this.rightRailEl, naturalRightWidth);
     this.rightRailEl.setCssProps({ right: `${RAIL_SCROLLBAR_GUTTER}px` });
 
     const desired: RailEntry[] = [];
@@ -1391,7 +1531,8 @@ export class NativePdfOverlay {
         if (!this.wantsMarginCard(h)) continue;
         const anchor = this.computeNativeAnchor(h, page.box, page.geom, areaRect);
         if (!anchor) continue;
-        if ((anchor.side === "left" ? leftWidth : rightWidth) < RAIL_HIDE_WIDTH) continue;
+        const railWidth = anchor.side === "left" ? naturalLeftWidth : naturalRightWidth;
+        if (railWidth < RAIL_HIDE_WIDTH) continue;
         desired.push({ h, anchor });
       }
     }
@@ -1419,12 +1560,18 @@ export class NativePdfOverlay {
   }
 
   /** Same policy as the custom view: tags show a card while pinned or engaged;
-   * highlights show one once they carry a note / CJK note / pin. */
+   * highlights show once they carry a note / side note / pin, or while engaged. */
   private wantsMarginCard(h: Highlight): boolean {
     if (annotationTypeOf(h) === "tag") {
       return !!h.isPinned || h.id === this.hoverId || h.id === this.activeId;
     }
-    return typeof h.note === "string" || !!h.noteContentCJK || !!h.isPinned;
+    return (
+      typeof h.note === "string" ||
+      !!h.noteContentCJK ||
+      !!h.isPinned ||
+      h.id === this.hoverId ||
+      h.id === this.activeId
+    );
   }
 
   private computeNativeAnchor(
@@ -1494,7 +1641,7 @@ export class NativePdfOverlay {
     const focused = doc.activeElement instanceof HTMLElement ? doc.activeElement : null;
     const wanted = new Map(desired.map((d) => [d.h.id, d]));
 
-    for (const card of Array.from(margins.querySelectorAll<HTMLElement>(".lpa-margin-card"))) {
+    for (const card of Array.from(margins.querySelectorAll<HTMLElement>(".lpa-native-rail > .lpa-margin-card"))) {
       const id = card.dataset.hlId ?? "";
       const entry = wanted.get(id);
       const holdsFocus = !!focused && card.contains(focused);
@@ -1512,16 +1659,17 @@ export class NativePdfOverlay {
     }
     for (const entry of wanted.values()) {
       const rail = entry.anchor.side === "left" ? this.leftRailEl : this.rightRailEl;
-      if (rail) this.createRailCard(rail, entry.h);
+      if (rail) this.createRailCard(rail, entry.h, entry.anchor.side);
     }
   }
 
-  private createRailCard(rail: HTMLElement, h: Highlight): HTMLElement {
+  private createRailCard(rail: HTMLElement, h: Highlight, side: "left" | "right"): HTMLElement {
     const type = annotationTypeOf(h);
     const card = rail.createDiv({ cls: `lpa-margin-card lpa-native-card lpa-margin-card--${type}` });
     card.dataset.hlId = h.id;
     card.dataset.annotationId = h.id;
-    card.dataset.side = rail === this.leftRailEl ? "left" : "right";
+    card.dataset.side = side;
+    card.dataset.placement = "rail";
 
     card.addEventListener("mouseenter", () => this.setHoveredAnnotation(h.id));
     card.addEventListener("mouseleave", () => this.clearHoveredAnnotationSoon(h.id));
@@ -1571,14 +1719,14 @@ export class NativePdfOverlay {
       card.createDiv({ cls: "lpa-margin-source", text: shortAnnotationText(h.text, 180) });
     }
 
-    const cjk = card.createEl("textarea", {
-      cls: "lpa-margin-cjk",
-      attr: { placeholder: "CJK note", rows: "2", "aria-label": "Secondary CJK annotation" },
+    const sideNote = card.createEl("textarea", {
+      cls: "lpa-margin-side-note",
+      attr: { placeholder: "Side note", rows: "2", "aria-label": "Side note" },
     });
-    cjk.value = h.noteContentCJK ?? "";
-    cjk.onfocus = () => this.setActiveAnnotation(h.id);
-    cjk.oninput = () => {
-      this.store?.update(h.id, { noteContentCJK: cjk.value.trim() ? cjk.value : undefined });
+    sideNote.value = h.noteContentCJK ?? "";
+    sideNote.onfocus = () => this.setActiveAnnotation(h.id);
+    sideNote.oninput = () => {
+      this.store?.update(h.id, { noteContentCJK: sideNote.value.trim() ? sideNote.value : undefined });
       if (this.listPanelEl) this.renderListItems();
       this.scheduleRailLayout();
     };
@@ -1606,9 +1754,9 @@ export class NativePdfOverlay {
     if (note && doc.activeElement !== note && note.value !== (h.note ?? "")) {
       note.value = h.note ?? "";
     }
-    const cjk = card.querySelector<HTMLTextAreaElement>(".lpa-margin-cjk");
-    if (cjk && doc.activeElement !== cjk && cjk.value !== (h.noteContentCJK ?? "")) {
-      cjk.value = h.noteContentCJK ?? "";
+    const sideNote = card.querySelector<HTMLTextAreaElement>(".lpa-margin-side-note");
+    if (sideNote && doc.activeElement !== sideNote && sideNote.value !== (h.noteContentCJK ?? "")) {
+      sideNote.value = h.noteContentCJK ?? "";
     }
     const pin = card.querySelector<HTMLElement>(".lpa-pin-btn");
     if (pin) {
@@ -1670,9 +1818,6 @@ export class NativePdfOverlay {
     const svgNS = "http://www.w3.org/2000/svg";
 
     for (const { h, anchor } of desired) {
-      if ((anchor.side === "left" ? this.railWidths.left : this.railWidths.right) < RAIL_HIDE_WIDTH) {
-        continue;
-      }
       const card = margins.querySelector<HTMLElement>(
         `.lpa-margin-card[data-hl-id="${cssEscape(h.id)}"]`
       );
@@ -1985,6 +2130,9 @@ export class NativePdfOverlay {
     const pageEl = root.querySelector<HTMLElement>(`.page[data-page-number="${h.page + 1}"]`);
     if (!pageEl) return;
     pageEl.scrollIntoView({ block: "center" });
+    this.setActiveAnnotation(id);
+    void this.ensureReadableRailForAnnotation(id);
+    this.scheduleRailLayout();
     // The native viewer renders lazily; poll briefly for the painted mark.
     const isTag = annotationTypeOf(h) === "tag";
     for (let i = 0; i < 12; i++) {
@@ -2005,6 +2153,7 @@ export class NativePdfOverlay {
         el.addClass("lpa-flash");
         const flashed = el;
         window.setTimeout(() => flashed.removeClass("lpa-flash"), 1200);
+        this.scheduleRailLayout();
         return;
       }
     }

@@ -743,14 +743,14 @@ export class PdfAnnotatorView extends FileView {
       card.createDiv({ cls: "lpa-margin-source", text: shortAnnotationText(h.text, 180) });
     }
 
-    const cjk = card.createEl("textarea", {
-      cls: "lpa-margin-cjk",
-      attr: { placeholder: "CJK note", rows: "2", "aria-label": "Secondary CJK annotation" },
+    const sideNote = card.createEl("textarea", {
+      cls: "lpa-margin-side-note",
+      attr: { placeholder: "Side note", rows: "2", "aria-label": "Side note" },
     });
-    cjk.value = h.noteContentCJK ?? "";
-    cjk.onfocus = () => this.activateHighlight(h.id);
-    cjk.oninput = () => {
-      this.store?.update(h.id, { noteContentCJK: cjk.value.trim() ? cjk.value : undefined });
+    sideNote.value = h.noteContentCJK ?? "";
+    sideNote.onfocus = () => this.activateHighlight(h.id);
+    sideNote.oninput = () => {
+      this.store?.update(h.id, { noteContentCJK: sideNote.value.trim() ? sideNote.value : undefined });
       this.renderAnnotationRollList();
       this.scheduleMarginLayout();
     };

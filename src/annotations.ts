@@ -67,7 +67,7 @@ export interface Highlight {
   style?: MarkStyle; // the STYLE axis; absent ⇒ "highlight" (backward compatible)
   text: string; // selected / quoted text
   note?: string; // user comment (carried over from legacy import)
-  noteContentCJK?: string; // optional secondary annotation
+  noteContentCJK?: string; // legacy storage key for the optional side note
   rects: PdfRect[]; // one rect per visual line
   tagX?: number; // percentage of page width, for page-note tags
   tagY?: number; // percentage of page height, for page-note tags
