@@ -1684,6 +1684,9 @@ export class NativePdfOverlay {
       evt.preventDefault();
       this.focusRailNote(h.id);
     });
+    card.addEventListener("transitionend", (evt) => {
+      if (evt.propertyName === "max-height") this.scheduleRailLayout();
+    });
 
     const head = card.createDiv({ cls: "lpa-margin-card-head" });
     head.createSpan({ cls: "lpa-margin-dot", attr: { "aria-hidden": "true" } });
@@ -1778,7 +1781,7 @@ export class NativePdfOverlay {
           const idealY = entry
             ? entry.anchor.idealY
             : Number.parseFloat(card.style.top || "0"); // focused orphan: hold position
-          return { card, idealY, height: card.offsetHeight || 24 };
+          return { card, idealY, height: measureMarginCardHeight(card) };
         })
         .sort((a, b) => a.idealY - b.idealY);
       let y = 8;
@@ -2594,6 +2597,23 @@ function annotationMatchesSearch(h: Highlight, query: string): boolean {
     .replace(/\s+/g, " ")
     .toLowerCase();
   return query.split(" ").every((part) => haystack.includes(part));
+}
+
+function measureMarginCardHeight(card: HTMLElement): number {
+  const win = card.ownerDocument.defaultView ?? window;
+  const style = win.getComputedStyle(card);
+  const current = card.getBoundingClientRect().height || card.offsetHeight || 0;
+  const maxHeight = parseCssPixelValue(style.maxHeight);
+  const borderY =
+    parseCssPixelValue(style.borderTopWidth, 0) + parseCssPixelValue(style.borderBottomWidth, 0);
+  const natural = card.scrollHeight + borderY;
+  const target = Number.isFinite(maxHeight) ? Math.min(natural, maxHeight) : natural;
+  return Math.max(24, current, target);
+}
+
+function parseCssPixelValue(value: string, fallback = Number.POSITIVE_INFINITY): number {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function dedupeKey(text: string): string {

@@ -700,6 +700,9 @@ export class PdfAnnotatorView extends FileView {
       evt.preventDefault();
       this.activateHighlight(h.id, { focusNote: true });
     });
+    card.addEventListener("transitionend", (evt) => {
+      if (evt.propertyName === "max-height") this.scheduleMarginLayout();
+    });
 
     const head = card.createDiv({ cls: "lpa-margin-card-head" });
     head.createSpan({ cls: "lpa-margin-dot", attr: { "aria-hidden": "true" } });
@@ -2075,7 +2078,7 @@ export class PdfAnnotatorView extends FileView {
         const id = card.dataset.hlId ?? "";
         const h = id ? this.store?.get(id) : undefined;
         const anchor = h ? this.computeAnnotationAnchor(h) : null;
-        return h && anchor ? { card, h, anchor, height: card.offsetHeight || 24 } : null;
+        return h && anchor ? { card, h, anchor, height: measureMarginCardHeight(card) } : null;
       })
       .filter((item): item is { card: HTMLElement; h: Highlight; anchor: AnnotationAnchor; height: number } => !!item)
       .sort((a, b) => a.anchor.idealY - b.anchor.idealY);
@@ -2940,6 +2943,23 @@ function selectionFocusFallbackRect(rects: DOMRect[], backward: boolean): DOMRec
   const clean = rects.filter((r) => r.width >= 1 && r.height >= 1);
   if (!clean.length) return null;
   return backward ? clean[0] : clean[clean.length - 1];
+}
+
+function measureMarginCardHeight(card: HTMLElement): number {
+  const win = card.ownerDocument.defaultView ?? window;
+  const style = win.getComputedStyle(card);
+  const current = card.getBoundingClientRect().height || card.offsetHeight || 0;
+  const maxHeight = parseCssPixelValue(style.maxHeight);
+  const borderY =
+    parseCssPixelValue(style.borderTopWidth, 0) + parseCssPixelValue(style.borderBottomWidth, 0);
+  const natural = card.scrollHeight + borderY;
+  const target = Number.isFinite(maxHeight) ? Math.min(natural, maxHeight) : natural;
+  return Math.max(24, current, target);
+}
+
+function parseCssPixelValue(value: string, fallback = Number.POSITIVE_INFINITY): number {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 /**

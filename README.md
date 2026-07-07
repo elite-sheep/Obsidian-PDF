@@ -1,54 +1,76 @@
 # PDF Annotator
 
-PDF Annotator is a desktop-only Obsidian plugin for reading PDFs, marking
-passages, and keeping searchable annotations next to the document.
+PDF Annotator is a desktop-only Obsidian plugin for reading PDFs, highlighting
+passages, and keeping local notes beside the page you are reading.
 
-It stores annotation data in a local Markdown sidecar beside each PDF. The PDF
-file itself is not modified, and the annotation source remains readable and
-portable.
+Open a PDF normally, turn on **Annotate** in the native PDF toolbar, and work in
+the same Obsidian PDF view. The plugin does not replace Obsidian's PDF toolbar,
+thumbnail/sidebar area, zoom controls, or page navigation.
 
-## Features
+Annotation data is stored in a local Markdown sidecar beside each PDF. The PDF
+file itself is not modified.
 
-- Annotate inside Obsidian's native PDF viewer without replacing its toolbar,
-  sidebar, zoom, or page navigation.
-- Keep the original bundled `pdf.js` annotator view available as a stable
-  fallback.
-- Select text without creating anything by accident.
-- Use the contextual selection popup to create either:
-  - a highlight only, or
-  - an annotation with a highlight and note.
-- Keep text crisp: highlight color is painted behind selectable PDF text.
-- View annotation cards in left and right margins at the level of their source
-  passage in the fallback annotator view.
+![Text selection popup with highlight, annotate, and copy actions](docs/screenshots/selection-popover.png)
+
+## What You Can Do
+
+- Highlight selected PDF text in Obsidian's native PDF viewer.
+- Add a note to a highlight without leaving the PDF tab.
+- Keep annotation cards in the left or right rail beside the PDF page.
+- Edit notes directly from the side card or from the annotation popover.
+- Use different mark styles and colors for emphasis.
+- Add page-level notes for thoughts that are not tied to selected text.
 - Search highlights, notes, and page tags from the annotation list.
-- Add page-level tags for notes that are not tied to a text selection.
-- Move margin cards between left and right margins.
+- Pin important side cards so they remain visible.
+- Move a card to the left rail, right rail, or automatic placement from the
+  card context menu.
 - Import legacy `obsidian-annotator` highlights for the current PDF.
 
-## Opening PDFs
+![Annotation card in the side rail with the edit popover open](docs/screenshots/side-rail-card.png)
 
-Open a PDF normally in Obsidian. The native PDF toolbar gets an **Annotate**
-toggle. Turning it on layers annotation tools onto the current native PDF view,
-without opening a duplicate tab or replacing the page.
-
-The command palette action **Open current PDF in annotator** remains available
-as a stable fallback for the custom PDF Annotator view.
-
-You can also make it the default PDF viewer from plugin settings. This redirects
-ordinary `.pdf` clicks into PDF Annotator. The setting is opt-in for fresh
-installs.
-
-## Basic Use
+## Native PDF Workflow
 
 1. Open a PDF normally in Obsidian.
 2. Click **Annotate** in the native PDF toolbar.
-3. Drag-select text. Selection alone creates nothing.
-4. Use the selection popup when it opens.
-5. Choose **Highlight** to save only a text mark.
-6. Choose **Annotate** to save a text mark plus a note.
-7. Use the note button in the toolbar to place a page note at a specific
-   location on the PDF.
-8. Use the list button in the toolbar to open searchable annotations.
+3. Select text. Selection alone does not create an annotation.
+4. Use the popup to choose **Highlight**, **Annotate**, or **Copy**.
+5. Click an existing mark to edit its style, color, note, or side note.
+6. Use the side card for quick reading and note editing while the PDF stays in
+   the normal Obsidian viewer.
+
+When the PDF is too wide for a readable side card, PDF Annotator uses the native
+zoom-out control to create rail space before showing the card. Cards should stay
+in the side rails rather than floating over the PDF page.
+
+## Side Cards
+
+Side cards are the margin notes for your PDF. They appear beside the source
+highlight at roughly the same vertical position, with a connector line back to
+the marked text.
+
+Right-click a side card to:
+
+- pin or unpin it;
+- move it to the left rail;
+- move it to the right rail;
+- return it to automatic placement;
+- delete the annotation.
+
+Drag-and-drop between rails is not currently a plugin interaction; use the
+right-click card menu to move cards.
+
+## Fallback Annotator View
+
+The original bundled `pdf.js` annotator view is still included as a stable
+fallback. Use the command palette action:
+
+```text
+Open current PDF in annotator
+```
+
+You can also make the fallback annotator the default PDF viewer from plugin
+settings. This redirects ordinary `.pdf` clicks into PDF Annotator. The setting
+is opt-in for fresh installs.
 
 ## Data Format
 
@@ -80,8 +102,8 @@ Import legacy obsidian-annotator highlights for this PDF
 ```
 
 The importer searches notes with `annotation-target:` frontmatter, re-anchors
-quoted text in the PDF, and creates PDF Annotator highlights. Legacy notes
-are left untouched.
+quoted text in the PDF, and creates PDF Annotator highlights. Legacy notes are
+left untouched.
 
 ## Development
 
@@ -97,8 +119,8 @@ plugin directory used by this checkout.
 
 ## Release Files
 
-Obsidian installs community plugin releases from GitHub release assets. A release
-must include:
+Obsidian installs community plugin releases from GitHub release assets. A
+release must include:
 
 - `main.js`
 - `manifest.json`
