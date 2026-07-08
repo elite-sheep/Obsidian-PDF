@@ -42,7 +42,9 @@ import {
   MARK_STYLE_LABELS,
   markStyleOf,
   newId,
+  legacySidecarPathFor,
   sidecarPathFor,
+  type AnnotationPathOptions,
   type Highlight,
   type MarkStyle,
   type PdfRect,
@@ -129,7 +131,8 @@ export class NativeOverlayManager {
 
   constructor(
     private plugin: Plugin,
-    private enabled: () => boolean
+    private enabled: () => boolean,
+    private getAnnotationPathOptions: () => AnnotationPathOptions
   ) {}
 
   private get app(): App {
@@ -198,7 +201,7 @@ export class NativeOverlayManager {
     }
     const file = nativeViewFile(leaf);
     if (!file) return;
-    const overlay = new NativePdfOverlay(this.plugin, leaf, file);
+    const overlay = new NativePdfOverlay(this.plugin, leaf, file, this.getAnnotationPathOptions);
     this.overlays.set(leaf, overlay);
     this.refresh();
     try {
@@ -283,7 +286,7 @@ export class NativeOverlayManager {
 
 /**
  * One active annotation overlay bound to (leaf, file). Reads/writes the same
- * "<pdf>.annotations.md" sidecar as the custom annotator view.
+ * configured annotation sidecar as the custom annotator view.
  */
 export class NativePdfOverlay {
   private destroyed = false;
@@ -332,7 +335,8 @@ export class NativePdfOverlay {
   constructor(
     private plugin: Plugin,
     private leaf: WorkspaceLeaf,
-    readonly file: TFile
+    readonly file: TFile,
+    private getAnnotationPathOptions: () => AnnotationPathOptions
   ) {}
 
   private get app(): App {
@@ -363,12 +367,14 @@ export class NativePdfOverlay {
     const fingerprint = Array.isArray(this.pdfDoc.fingerprints)
       ? this.pdfDoc.fingerprints[0]
       : this.pdfDoc.fingerprint;
+    const pathOptions = this.getAnnotationPathOptions();
     this.store = new AnnotationStore(
       this.app.vault.adapter,
-      sidecarPathFor(this.file.path),
+      sidecarPathFor(this.file.path, pathOptions),
       this.file.basename,
       this.file.path,
-      fingerprint
+      fingerprint,
+      [legacySidecarPathFor(this.file.path)]
     );
     await this.store.load();
     if (this.destroyed) return;

@@ -20,7 +20,9 @@ import {
   MARK_STYLE_LABELS,
   markStyleOf,
   newId,
+  legacySidecarPathFor,
   sidecarPathFor,
+  type AnnotationPathOptions,
   type Highlight,
   type MarkStyle,
   type PdfRect,
@@ -171,7 +173,10 @@ export class PdfAnnotatorView extends FileView {
   private selectionPopoverEl: HTMLElement | null = null;
   private collapsedMargins: Record<"left" | "right", boolean> = { left: false, right: false };
 
-  constructor(leaf: WorkspaceLeaf) {
+  constructor(
+    leaf: WorkspaceLeaf,
+    private getAnnotationPathOptions: () => AnnotationPathOptions = () => ({})
+  ) {
     super(leaf);
     this.navigation = true;
     this.allowNoFile = false;
@@ -504,12 +509,14 @@ export class PdfAnnotatorView extends FileView {
     const fingerprint = Array.isArray(this.pdfDoc.fingerprints)
       ? this.pdfDoc.fingerprints[0]
       : this.pdfDoc.fingerprint;
+    const pathOptions = this.getAnnotationPathOptions();
     this.store = new AnnotationStore(
       this.app.vault.adapter,
-      sidecarPathFor(file.path),
+      sidecarPathFor(file.path, pathOptions),
       file.basename,
       file.path,
-      fingerprint
+      fingerprint,
+      [legacySidecarPathFor(file.path)]
     );
     await this.store.load();
 

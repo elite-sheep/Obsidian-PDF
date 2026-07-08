@@ -12,18 +12,34 @@ import { Plugin, TFile, WorkspaceLeaf, Notice, PluginSettingTab, Setting } from 
 import { PdfAnnotatorView, VIEW_TYPE_PDF_ANNOTATOR } from "./view";
 import { initPdfEngine, disposePdfEngine, LOG_TAG } from "./pdf-engine";
 import { NativeOverlayManager } from "./native-overlay";
+import {
+  DEFAULT_ANNOTATION_FOLDER,
+  normalizeAnnotationStorageFolder,
+  type AnnotationPathOptions,
+  type AnnotationStorageMode,
+} from "./annotations";
 
 interface LpaSettings {
   /** Override Obsidian's core PDF viewer so clicking a PDF opens this view. */
   registerAsDefaultPdfHandler: boolean;
   /** Inject annotation mode into the native PDF view (experimental). */
   enableNativeOverlay: boolean;
+  /** Where Markdown annotation sidecars should be written. */
+  annotationStorageMode: AnnotationStorageMode;
+  /** Vault-relative folder used when annotationStorageMode is "folder". */
+  annotationStorageFolder: string;
 }
 
 const DEFAULT_SETTINGS: LpaSettings = {
   registerAsDefaultPdfHandler: false,
   enableNativeOverlay: true,
+  annotationStorageMode: "folder",
+  annotationStorageFolder: DEFAULT_ANNOTATION_FOLDER,
 };
+
+function coerceAnnotationStorageMode(value: string): AnnotationStorageMode {
+  return value === "beside-pdf" ? "beside-pdf" : "folder";
+}
 
 export default class LocalPdfAnnotatorPlugin extends Plugin {
   settings!: LpaSettings;
@@ -43,10 +59,14 @@ export default class LocalPdfAnnotatorPlugin extends Plugin {
 
     this.registerView(
       VIEW_TYPE_PDF_ANNOTATOR,
-      (leaf: WorkspaceLeaf) => new PdfAnnotatorView(leaf)
+      (leaf: WorkspaceLeaf) => new PdfAnnotatorView(leaf, () => this.annotationPathOptions())
     );
 
-    this.nativeOverlays = new NativeOverlayManager(this, () => this.settings.enableNativeOverlay);
+    this.nativeOverlays = new NativeOverlayManager(
+      this,
+      () => this.settings.enableNativeOverlay,
+      () => this.annotationPathOptions()
+    );
 
     // Trigger 1: command palette.
     this.addCommand({
@@ -201,10 +221,23 @@ export default class LocalPdfAnnotatorPlugin extends Plugin {
 
   async loadSettings(): Promise<void> {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.settings.annotationStorageMode = coerceAnnotationStorageMode(
+      this.settings.annotationStorageMode
+    );
+    this.settings.annotationStorageFolder = normalizeAnnotationStorageFolder(
+      this.settings.annotationStorageFolder
+    );
   }
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
+  }
+
+  annotationPathOptions(): AnnotationPathOptions {
+    return {
+      storageMode: this.settings.annotationStorageMode,
+      storageFolder: this.settings.annotationStorageFolder,
+    };
   }
 }
 
@@ -216,6 +249,35 @@ class LpaSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
+
+    new Setting(containerEl)
+      .setName("Annotation file location")
+      .setDesc("Store annotation Markdown files away from the PDFs, or keep the old beside-the-PDF layout.")
+      .addDropdown((d) =>
+        d
+          .addOption("folder", "PDF annotations folder")
+          .addOption("beside-pdf", "Same folder as PDF")
+          .setValue(this.plugin.settings.annotationStorageMode)
+          .onChange(async (v) => {
+            this.plugin.settings.annotationStorageMode = coerceAnnotationStorageMode(v);
+            await this.plugin.saveSettings();
+            this.display();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Annotation folder")
+      .setDesc("Vault-relative folder used for annotation Markdown files.")
+      .addText((t) => {
+        t
+          .setPlaceholder(DEFAULT_ANNOTATION_FOLDER)
+          .setValue(this.plugin.settings.annotationStorageFolder)
+          .onChange(async (v) => {
+            this.plugin.settings.annotationStorageFolder = normalizeAnnotationStorageFolder(v);
+            await this.plugin.saveSettings();
+          });
+        t.inputEl.disabled = this.plugin.settings.annotationStorageMode !== "folder";
+      });
 
     new Setting(containerEl)
       .setName("Annotate inside the native PDF view (experimental)")

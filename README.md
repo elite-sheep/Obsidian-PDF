@@ -7,8 +7,9 @@ Open a PDF normally, turn on **Annotate** in the native PDF toolbar, and work in
 the same Obsidian PDF view. The plugin does not replace Obsidian's PDF toolbar,
 thumbnail/sidebar area, zoom controls, or page navigation.
 
-Annotation data is stored in a local Markdown sidecar beside each PDF. The PDF
-file itself is not modified.
+Annotation data is stored in local Markdown sidecars. By default, sidecars go
+under a central `PDF annotations` vault folder so they do not appear beside your
+books. The PDF file itself is not modified.
 
 ![Text selection popup with highlight, annotate, and copy actions](docs/screenshots/selection-popover.png)
 
@@ -80,9 +81,14 @@ Each PDF gets a companion file named:
 <pdf-name>.annotations.md
 ```
 
-The sidecar lives in the same folder as the PDF. It contains a readable Markdown
-summary and a fenced JSON block that is used as the machine-readable source of
-truth.
+By default, sidecars are stored under `PDF annotations/`, mirroring the PDF's
+vault path. For example, `Books/Novel.pdf` writes to
+`PDF annotations/Books/Novel.annotations.md`. Plugin settings can switch back to
+the old same-folder layout if you prefer the sidecar beside the PDF.
+
+The sidecar contains a readable Markdown summary and a fenced JSON block that is
+used as the machine-readable source of truth. Existing same-folder sidecars are
+still read for compatibility.
 
 Highlight geometry is stored in PDF user-space coordinates, so highlights and
 tags remain anchored across zoom changes.

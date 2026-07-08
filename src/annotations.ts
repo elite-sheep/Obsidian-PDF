@@ -1,14 +1,15 @@
 /**
  * annotations.ts — annotation data model + sidecar persistence.
  *
- * Storage: a human-readable sidecar next to the PDF, "<pdfname>.annotations.md".
- * It has a prose list (for skimming / future back-links) AND a fenced ```json
- * block that is the machine source of truth. Geometry is stored in PDF
- * USER-SPACE units (origin bottom-left, y-up) so it is scale-independent and
- * survives zoom / re-render / window resize.
+ * Storage: a human-readable Markdown sidecar. By default it lives in a central
+ * vault folder, but the old "<pdfname>.annotations.md" beside-the-PDF layout is
+ * still supported. It has a prose list (for skimming / future back-links) AND a
+ * fenced ```json block that is the machine source of truth. Geometry is stored
+ * in PDF USER-SPACE units (origin bottom-left, y-up) so it is scale-independent
+ * and survives zoom / re-render / window resize.
  */
 import type { DataAdapter } from "obsidian";
-import { debounce } from "obsidian";
+import { debounce, normalizePath } from "obsidian";
 
 export interface PdfRect {
   // PDF user space (same convention as viewport.convertToPdfPoint).
@@ -87,6 +88,15 @@ export interface AnnotationDoc {
   highlights: Highlight[];
 }
 
+export type AnnotationStorageMode = "folder" | "beside-pdf";
+
+export interface AnnotationPathOptions {
+  storageMode?: AnnotationStorageMode;
+  storageFolder?: string;
+}
+
+export const DEFAULT_ANNOTATION_FOLDER = "PDF annotations";
+
 /**
  * The COLOR/meaning palette. Fills should read like real marker/pen colors,
  * while the painted alpha is capped in the renderer so text remains legible.
@@ -164,9 +174,37 @@ function colorEmoji(color: string): string {
   return resolvePalette(color)?.emoji ?? "🟨";
 }
 
-/** Derive the sidecar path from a PDF's vault path. */
-export function sidecarPathFor(pdfVaultPath: string): string {
-  return pdfVaultPath.replace(/\.pdf$/i, "") + ".annotations.md";
+function pdfAnnotationStem(pdfVaultPath: string): string {
+  return normalizePath(pdfVaultPath).replace(/\.pdf$/i, "");
+}
+
+export function normalizeAnnotationStorageFolder(folder: string | null | undefined): string {
+  const normalized = normalizePath((folder ?? "").trim() || DEFAULT_ANNOTATION_FOLDER)
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "");
+  return normalized || DEFAULT_ANNOTATION_FOLDER;
+}
+
+/** Derive the legacy beside-the-PDF sidecar path from a PDF's vault path. */
+export function legacySidecarPathFor(pdfVaultPath: string): string {
+  return pdfAnnotationStem(pdfVaultPath) + ".annotations.md";
+}
+
+/**
+ * Derive the active sidecar path from a PDF's vault path and storage settings.
+ *
+ * Folder mode mirrors the PDF's vault-relative path under the annotation folder:
+ * "Books/Novel.pdf" -> "PDF annotations/Books/Novel.annotations.md".
+ */
+export function sidecarPathFor(
+  pdfVaultPath: string,
+  options: AnnotationPathOptions = {}
+): string {
+  if (options.storageMode === "folder") {
+    const folder = normalizeAnnotationStorageFolder(options.storageFolder);
+    return normalizePath(`${folder}/${pdfAnnotationStem(pdfVaultPath)}.annotations.md`);
+  }
+  return legacySidecarPathFor(pdfVaultPath);
 }
 
 export function serializeAnnotations(doc: AnnotationDoc, pdfBasename: string): string {
@@ -243,24 +281,30 @@ export class AnnotationStore {
     private sidecarPath: string,
     private pdfBasename: string,
     pdfVaultPath: string,
-    fingerprint?: string
+    fingerprint?: string,
+    private loadFallbackPaths: string[] = []
   ) {
     this.doc = { version: 1, pdf: pdfVaultPath, fingerprint, highlights: [] };
     this.flushDebounced = debounce(() => void this.flush(), 600, true);
   }
 
   async load(): Promise<void> {
-    try {
-      if (await this.adapter.exists(this.sidecarPath)) {
-        const content = await this.adapter.read(this.sidecarPath);
+    const paths = [this.sidecarPath, ...this.loadFallbackPaths].filter(
+      (path, index, all) => path && all.indexOf(path) === index
+    );
+    for (const path of paths) {
+      try {
+        if (!(await this.adapter.exists(path))) continue;
+        const content = await this.adapter.read(path);
         const parsed = parseAnnotations(content);
         if (parsed) {
           this.doc.highlights = parsed.highlights;
           if (parsed.fingerprint) this.doc.fingerprint = parsed.fingerprint;
+          return;
         }
+      } catch {
+        /* try the next candidate path */
       }
-    } catch {
-      /* start empty on any read/parse failure */
     }
   }
 
@@ -307,6 +351,27 @@ export class AnnotationStore {
     if (!this.dirty) return;
     this.dirty = false;
     const out = serializeAnnotations(this.doc, this.pdfBasename);
+    await this.ensureParentFolder(this.sidecarPath);
     await this.adapter.write(this.sidecarPath, out);
+  }
+
+  private async ensureParentFolder(filePath: string): Promise<void> {
+    const parent = normalizePath(filePath).split("/").slice(0, -1).join("/");
+    if (!parent) return;
+
+    const parts = parent.split("/").filter(Boolean);
+    let current = "";
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part;
+      const stat = await this.adapter.stat(current);
+      if (stat?.type === "folder") continue;
+      if (stat) throw new Error(`Cannot create annotation folder because ${current} is a file.`);
+      try {
+        await this.adapter.mkdir(current);
+      } catch (e) {
+        const after = await this.adapter.stat(current);
+        if (after?.type !== "folder") throw e;
+      }
+    }
   }
 }
