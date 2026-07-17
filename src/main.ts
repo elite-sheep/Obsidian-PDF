@@ -8,7 +8,15 @@
  *     native PDF view's toolbar layers annotation tools onto Obsidian's own
  *     viewer without replacing it (see native-overlay.ts)
  */
-import { Plugin, TFile, WorkspaceLeaf, Notice, PluginSettingTab, Setting } from "obsidian";
+import {
+  FuzzySuggestModal,
+  Plugin,
+  TFile,
+  WorkspaceLeaf,
+  Notice,
+  PluginSettingTab,
+  Setting,
+} from "obsidian";
 import { PdfAnnotatorView, VIEW_TYPE_PDF_ANNOTATOR } from "./view";
 import { initPdfEngine, disposePdfEngine, LOG_TAG } from "./pdf-engine";
 import { NativeOverlayManager } from "./native-overlay";
@@ -18,15 +26,21 @@ import {
   type AnnotationPathOptions,
   type AnnotationStorageMode,
 } from "./annotations";
+import {
+  DEFAULT_RECOVERY_FOLDER,
+  PDF_BUNDLE_LIBRARY,
+  PdfBundleManager,
+  type PdfBundleBinding,
+} from "./bundles";
 
 interface LpaSettings {
   /** Override Obsidian's core PDF viewer so clicking a PDF opens this view. */
   registerAsDefaultPdfHandler: boolean;
   /** Inject annotation mode into the native PDF view (experimental). */
   enableNativeOverlay: boolean;
-  /** Where Markdown annotation sidecars should be written. */
+  /** Legacy sidecar mode retained only for migration compatibility. */
   annotationStorageMode: AnnotationStorageMode;
-  /** Vault-relative folder used when annotationStorageMode is "folder". */
+  /** Vault-relative folder searched for legacy sidecars and used for exports. */
   annotationStorageFolder: string;
 }
 
@@ -44,11 +58,13 @@ function coerceAnnotationStorageMode(value: string): AnnotationStorageMode {
 export default class LocalPdfAnnotatorPlugin extends Plugin {
   settings!: LpaSettings;
   nativeOverlays!: NativeOverlayManager;
+  bundleManager!: PdfBundleManager;
   private replacingCorePdfView = false;
   private nativePdfRefreshRaf: number | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    this.bundleManager = new PdfBundleManager(this.app);
 
     // Configure + self-verify our bundled pdf.js worker up front so the console
     // shows the version match before any PDF is opened.
@@ -59,13 +75,15 @@ export default class LocalPdfAnnotatorPlugin extends Plugin {
 
     this.registerView(
       VIEW_TYPE_PDF_ANNOTATOR,
-      (leaf: WorkspaceLeaf) => new PdfAnnotatorView(leaf, () => this.annotationPathOptions())
+      (leaf: WorkspaceLeaf) =>
+        new PdfAnnotatorView(leaf, () => this.annotationPathOptions(), this.bundleManager)
     );
 
     this.nativeOverlays = new NativeOverlayManager(
       this,
       () => this.settings.enableNativeOverlay,
-      () => this.annotationPathOptions()
+      () => this.annotationPathOptions(),
+      this.bundleManager
     );
 
     // Trigger 1: command palette.
@@ -113,6 +131,65 @@ export default class LocalPdfAnnotatorPlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: "restore-backed-up-pdf",
+      name: "Restore a PDF from annotation backup",
+      callback: async () => {
+        const bundles = await this.bundleManager.listBundles();
+        if (!bundles.length) {
+          new Notice("PDF Annotator: no managed PDF backups found.");
+          return;
+        }
+        new PdfBackupRestoreModal(this, bundles).open();
+      },
+    });
+
+    this.addCommand({
+      id: "export-current-pdf-annotations",
+      name: "Export annotations for current PDF",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        if (!(file instanceof TFile) || file.extension !== "pdf") return false;
+        if (!checking) {
+          void this.bundleManager
+            .exportAnnotations(file, `${this.settings.annotationStorageFolder}/Exports`)
+            .then((path) => new Notice(`PDF Annotator: exported ${path}`))
+            .catch((e: any) => {
+              console.error(`${LOG_TAG} failed to export PDF annotations`, e);
+              new Notice(`PDF Annotator: export failed — ${e?.message ?? e}`);
+            });
+        }
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "verify-pdf-annotation-backups",
+      name: "Verify all PDF annotation backups",
+      callback: async () => {
+        const bundles = await this.bundleManager.listBundles();
+        if (!bundles.length) {
+          new Notice("PDF Annotator: no managed PDF backups found.");
+          return;
+        }
+        let failed = 0;
+        for (const bundle of bundles) {
+          const result = await this.bundleManager.verifyBundle(bundle);
+          if (!result.ok) {
+            failed++;
+            console.error(
+              `${LOG_TAG} backup verification failed for ${bundle.manifest.originalName}: ${result.reason}`
+            );
+          }
+        }
+        new Notice(
+          failed
+            ? `PDF Annotator: ${failed} of ${bundles.length} backups failed verification — see console.`
+            : `PDF Annotator: verified ${bundles.length} PDF backup${bundles.length === 1 ? "" : "s"}.`
+        );
+      },
+    });
+
     // Trigger 2: ordinary file clicks. Obsidian's core PDF view owns the "pdf"
     // extension, so registerExtensions cannot override it safely. Instead, use
     // the public file-open event and replace the active core PDF leaf.
@@ -129,6 +206,28 @@ export default class LocalPdfAnnotatorPlugin extends Plugin {
     );
     this.registerEvent(
       this.app.workspace.on("layout-change", () => this.scheduleNativePdfRefresh())
+    );
+    this.registerEvent(
+      this.app.vault.on("rename", (file, oldPath) => {
+        if (!(file instanceof TFile) || file.extension !== "pdf") return;
+        void this.bundleManager.onPdfRenamed(file, oldPath).catch((e) =>
+          console.error(`${LOG_TAG} failed to update PDF bundle path metadata`, e)
+        );
+        for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_PDF_ANNOTATOR)) {
+          const view = leaf.view;
+          if (view instanceof PdfAnnotatorView) view.syncPdfPath(file);
+        }
+        this.nativeOverlays.syncPdfPath(file);
+        this.scheduleNativePdfRefresh();
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("delete", (file) => {
+        if (!(file instanceof TFile) || file.extension !== "pdf") return;
+        void this.bundleManager.onPdfDeleted(file.path).catch((e) =>
+          console.error(`${LOG_TAG} failed to update deleted PDF bundle metadata`, e)
+        );
+      })
     );
     this.app.workspace.onLayoutReady(() => this.scheduleNativePdfRefresh());
 
@@ -251,23 +350,10 @@ class LpaSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     new Setting(containerEl)
-      .setName("Annotation file location")
-      .setDesc("Store annotation Markdown files away from the PDFs, or keep the old beside-the-PDF layout.")
-      .addDropdown((d) =>
-        d
-          .addOption("folder", "PDF annotations folder")
-          .addOption("beside-pdf", "Same folder as PDF")
-          .setValue(this.plugin.settings.annotationStorageMode)
-          .onChange(async (v) => {
-            this.plugin.settings.annotationStorageMode = coerceAnnotationStorageMode(v);
-            await this.plugin.saveSettings();
-            this.display();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Annotation folder")
-      .setDesc("Vault-relative folder used for annotation Markdown files.")
+      .setName("Legacy annotation folder")
+      .setDesc(
+        `Existing path-based sidecars are imported from this folder. New annotations and a verified PDF backup are kept together in ${PDF_BUNDLE_LIBRARY}.`
+      )
       .addText((t) => {
         t
           .setPlaceholder(DEFAULT_ANNOTATION_FOLDER)
@@ -276,7 +362,6 @@ class LpaSettingTab extends PluginSettingTab {
             this.plugin.settings.annotationStorageFolder = normalizeAnnotationStorageFolder(v);
             await this.plugin.saveSettings();
           });
-        t.inputEl.disabled = this.plugin.settings.annotationStorageMode !== "folder";
       });
 
     new Setting(containerEl)
@@ -314,5 +399,42 @@ class LpaSettingTab extends PluginSettingTab {
       text:
         "The command “Open current PDF in annotator” remains available as a stable custom-view fallback.",
     });
+  }
+}
+
+class PdfBackupRestoreModal extends FuzzySuggestModal<PdfBundleBinding> {
+  constructor(
+    private plugin: LocalPdfAnnotatorPlugin,
+    private bundles: PdfBundleBinding[]
+  ) {
+    super(plugin.app);
+    this.setPlaceholder("Choose a backed-up PDF to restore");
+  }
+
+  getItems(): PdfBundleBinding[] {
+    return this.bundles;
+  }
+
+  getItemText(binding: PdfBundleBinding): string {
+    const path = binding.manifest.currentPath ?? "working copy deleted";
+    return `${binding.manifest.originalName} — ${path}`;
+  }
+
+  onChooseItem(binding: PdfBundleBinding): void {
+    void this.restore(binding);
+  }
+
+  private async restore(binding: PdfBundleBinding): Promise<void> {
+    try {
+      const file = await this.plugin.bundleManager.restoreBundle(
+        binding,
+        DEFAULT_RECOVERY_FOLDER
+      );
+      new Notice(`PDF Annotator: restored ${file.path}`);
+      await this.plugin.openInAnnotator(file, "tab");
+    } catch (e: any) {
+      console.error(`${LOG_TAG} failed to restore PDF backup`, e);
+      new Notice(`PDF Annotator: restore failed — ${e?.message ?? e}`);
+    }
   }
 }

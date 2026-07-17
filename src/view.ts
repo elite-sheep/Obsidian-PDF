@@ -29,6 +29,7 @@ import {
 } from "./annotations";
 import { buildDocIndex, anchorQuote } from "./anchor";
 import { parseLegacyNote, targetBasename, type LegacyAnnotation } from "./legacy-import";
+import { PdfBundleManager } from "./bundles";
 
 export const VIEW_TYPE_PDF_ANNOTATOR = "local-pdf-annotator-view";
 
@@ -175,7 +176,8 @@ export class PdfAnnotatorView extends FileView {
 
   constructor(
     leaf: WorkspaceLeaf,
-    private getAnnotationPathOptions: () => AnnotationPathOptions = () => ({})
+    private getAnnotationPathOptions: () => AnnotationPathOptions = () => ({}),
+    private bundleManager?: PdfBundleManager
   ) {
     super(leaf);
     this.navigation = true;
@@ -510,13 +512,34 @@ export class PdfAnnotatorView extends FileView {
       ? this.pdfDoc.fingerprints[0]
       : this.pdfDoc.fingerprint;
     const pathOptions = this.getAnnotationPathOptions();
+    let annotationPath = sidecarPathFor(file.path, pathOptions);
+    let fallbackPaths = [legacySidecarPathFor(file.path)];
+    let migrateFallback = false;
+    let annotationBackupPath: string | undefined;
+    if (this.bundleManager) {
+      try {
+        const binding = await this.bundleManager.prepare(file, data, fingerprint, pathOptions);
+        annotationPath = binding.annotationPath;
+        fallbackPaths = binding.fallbackAnnotationPaths;
+        migrateFallback = true;
+        annotationBackupPath = binding.annotationBackupPath;
+      } catch (e: any) {
+        console.error(`${LOG_TAG} could not prepare managed PDF bundle`, e);
+        this.setError(
+          `Could not create a verified PDF backup. Annotation mode was not opened:\n${e?.message ?? e}`
+        );
+        return;
+      }
+    }
     this.store = new AnnotationStore(
       this.app.vault.adapter,
-      sidecarPathFor(file.path, pathOptions),
+      annotationPath,
       file.basename,
       file.path,
       fingerprint,
-      [legacySidecarPathFor(file.path)]
+      fallbackPaths,
+      migrateFallback,
+      annotationBackupPath
     );
     await this.store.load();
 
@@ -527,6 +550,12 @@ export class PdfAnnotatorView extends FileView {
   async onUnloadFile(_file: TFile): Promise<void> {
     await this.flushStore();
     this.teardownDocument();
+  }
+
+  syncPdfPath(file: TFile): void {
+    if (this.file !== file && this.file?.path !== file.path) return;
+    this.titleEl?.setText(file.basename);
+    this.store?.setPdfPath(file.path, file.basename);
   }
 
   private async flushStore(): Promise<void> {

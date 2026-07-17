@@ -7,9 +7,9 @@ Open a PDF normally, turn on **Annotate** in the native PDF toolbar, and work in
 the same Obsidian PDF view. The plugin does not replace Obsidian's PDF toolbar,
 thumbnail/sidebar area, zoom controls, or page navigation.
 
-Annotation data is stored in local Markdown sidecars. By default, sidecars go
-under a central `PDF annotations` vault folder so they do not appear beside your
-books. The PDF file itself is not modified.
+Every PDF opened for annotation is protected by a managed, vault-local document
+bundle. The plugin stores a verified byte-for-byte PDF backup, its Markdown
+annotations, and identity metadata together. The working PDF is not modified.
 
 ![Text selection popup with highlight, annotate, and copy actions](docs/screenshots/selection-popover.png)
 
@@ -75,23 +75,52 @@ is opt-in for fresh installs.
 
 ## Data Format
 
-Each PDF gets a companion file named:
+The visible PDF path is not the document identity. Identity comes from a SHA-256
+hash of the PDF bytes, and the canonical bundle is stored at:
 
 ```text
-<pdf-name>.annotations.md
+.pdf-annotator/bundles/sha256/<hash>/
+  document.pdf
+  annotations.md
+  annotations.previous.md
+  manifest.json
 ```
 
-By default, sidecars are stored under `PDF annotations/`, mirroring the PDF's
-vault path. For example, `Books/Novel.pdf` writes to
-`PDF annotations/Books/Novel.annotations.md`. Plugin settings can switch back to
-the old same-folder layout if you prefer the sidecar beside the PDF.
+`document.pdf` is a verified recovery copy. `annotations.md` is the canonical
+annotation sidecar, and `annotations.previous.md` is a rolling last-known-good
+copy used if a save is interrupted or corrupted. `manifest.json` records the
+current working path, previous path aliases, checksum, original filename,
+timestamps, and PDF fingerprint.
 
-The sidecar contains a readable Markdown summary and a fenced JSON block that is
-used as the machine-readable source of truth. Existing same-folder sidecars are
-still read for compatibility.
+The bundle is created the first time annotation mode opens for that PDF. This
+intentionally uses roughly one additional PDF's worth of vault storage in
+exchange for deletion recovery.
+
+Moving or renaming a working PDF does not move the bundle and cannot disconnect
+its annotations. Replacing a PDF with different bytes at the same path creates a
+different bundle, so annotations cannot silently attach to the wrong document.
+Deleting the working copy leaves the bundle intact. Use **Restore a PDF from
+annotation backup** in the command palette to verify the checksum and restore a
+copy into `Recovered PDFs/`.
+
+Existing central or same-folder `<pdf-name>.annotations.md` sidecars are imported
+on first open. A unique PDF-fingerprint match can also recover a sidecar that was
+already orphaned by a rename. Legacy files are retained as recovery snapshots.
+
+The canonical sidecar contains a readable Markdown summary and a fenced JSON
+block that is used as the machine-readable source of truth. Use **Export
+annotations for current PDF** to create a user-visible snapshot under
+`PDF annotations/Exports/` (or the configured legacy annotation folder).
 
 Highlight geometry is stored in PDF user-space coordinates, so highlights and
 tags remain anchored across zoom changes.
+
+Use **Verify all PDF annotation backups** to checksum every managed recovery
+copy. Backups are also verified when created and periodically when their PDFs
+are opened. The managed library protects against moving, renaming, replacing,
+or deleting a working copy; it is still part of the same vault, so the vault
+itself should remain covered by iCloud, Obsidian Sync, or another backup system.
+If your sync tool excludes hidden folders, explicitly include `.pdf-annotator/`.
 
 ## Privacy
 
@@ -122,6 +151,9 @@ npm run build
 `npm run build` type-checks the plugin, bundles `main.js`, and copies
 `main.js`, `manifest.json`, and `styles.css` into the configured local vault
 plugin directory used by this checkout.
+
+Set `LOCAL_PDF_ANNOTATOR_PLUGIN_DIR` to build into a staging directory without
+touching the installed Obsidian copy.
 
 ## Release Files
 

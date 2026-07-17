@@ -51,6 +51,7 @@ import {
 } from "./annotations";
 import { buildDocIndex, anchorQuote } from "./anchor";
 import { parseLegacyNote, targetBasename, type LegacyAnnotation } from "./legacy-import";
+import { PdfBundleManager } from "./bundles";
 
 const MAX_HIGHLIGHT_ALPHA = 0.46;
 /** DOM that belongs to us; mutations inside it must not re-trigger syncing. */
@@ -132,7 +133,8 @@ export class NativeOverlayManager {
   constructor(
     private plugin: Plugin,
     private enabled: () => boolean,
-    private getAnnotationPathOptions: () => AnnotationPathOptions
+    private getAnnotationPathOptions: () => AnnotationPathOptions,
+    private bundleManager?: PdfBundleManager
   ) {}
 
   private get app(): App {
@@ -201,7 +203,13 @@ export class NativeOverlayManager {
     }
     const file = nativeViewFile(leaf);
     if (!file) return;
-    const overlay = new NativePdfOverlay(this.plugin, leaf, file, this.getAnnotationPathOptions);
+    const overlay = new NativePdfOverlay(
+      this.plugin,
+      leaf,
+      file,
+      this.getAnnotationPathOptions,
+      this.bundleManager
+    );
     this.overlays.set(leaf, overlay);
     this.refresh();
     try {
@@ -215,6 +223,10 @@ export class NativeOverlayManager {
       if (this.overlays.get(leaf) === overlay) this.overlays.delete(leaf);
     }
     this.refresh();
+  }
+
+  syncPdfPath(file: TFile): void {
+    for (const overlay of this.overlays.values()) overlay.syncPdfPath(file);
   }
 
   /** Inject/sync the control group in one native PDF leaf. False if no bar yet. */
@@ -286,7 +298,7 @@ export class NativeOverlayManager {
 
 /**
  * One active annotation overlay bound to (leaf, file). Reads/writes the same
- * configured annotation sidecar as the custom annotator view.
+ * managed document bundle as the custom annotator view.
  */
 export class NativePdfOverlay {
   private destroyed = false;
@@ -336,7 +348,8 @@ export class NativePdfOverlay {
     private plugin: Plugin,
     private leaf: WorkspaceLeaf,
     readonly file: TFile,
-    private getAnnotationPathOptions: () => AnnotationPathOptions
+    private getAnnotationPathOptions: () => AnnotationPathOptions,
+    private bundleManager?: PdfBundleManager
   ) {}
 
   private get app(): App {
@@ -368,13 +381,26 @@ export class NativePdfOverlay {
       ? this.pdfDoc.fingerprints[0]
       : this.pdfDoc.fingerprint;
     const pathOptions = this.getAnnotationPathOptions();
+    let annotationPath = sidecarPathFor(this.file.path, pathOptions);
+    let fallbackPaths = [legacySidecarPathFor(this.file.path)];
+    let migrateFallback = false;
+    let annotationBackupPath: string | undefined;
+    if (this.bundleManager) {
+      const binding = await this.bundleManager.prepare(this.file, data, fingerprint, pathOptions);
+      annotationPath = binding.annotationPath;
+      fallbackPaths = binding.fallbackAnnotationPaths;
+      migrateFallback = true;
+      annotationBackupPath = binding.annotationBackupPath;
+    }
     this.store = new AnnotationStore(
       this.app.vault.adapter,
-      sidecarPathFor(this.file.path, pathOptions),
+      annotationPath,
       this.file.basename,
       this.file.path,
       fingerprint,
-      [legacySidecarPathFor(this.file.path)]
+      fallbackPaths,
+      migrateFallback,
+      annotationBackupPath
     );
     await this.store.load();
     if (this.destroyed) return;
@@ -403,6 +429,11 @@ export class NativePdfOverlay {
     this.initMarginRail();
     this.scheduleSync();
     console.log(`${LOG_TAG} native annotation overlay attached: ${this.file.path}`);
+  }
+
+  syncPdfPath(file: TFile): void {
+    if (this.file !== file && this.file.path !== file.path) return;
+    this.store?.setPdfPath(file.path, file.basename);
   }
 
   destroy(): void {

@@ -1,12 +1,12 @@
 /**
  * annotations.ts — annotation data model + sidecar persistence.
  *
- * Storage: a human-readable Markdown sidecar. By default it lives in a central
- * vault folder, but the old "<pdfname>.annotations.md" beside-the-PDF layout is
- * still supported. It has a prose list (for skimming / future back-links) AND a
- * fenced ```json block that is the machine source of truth. Geometry is stored
- * in PDF USER-SPACE units (origin bottom-left, y-up) so it is scale-independent
- * and survives zoom / re-render / window resize.
+ * Storage: a human-readable Markdown sidecar. Managed document bundles give it
+ * a path-independent canonical location; central and old beside-the-PDF paths
+ * remain supported as migration sources. It has a prose list (for skimming /
+ * future back-links) AND a fenced ```json block that is the machine source of
+ * truth. Geometry is stored in PDF USER-SPACE units (origin bottom-left, y-up)
+ * so it is scale-independent and survives zoom / re-render / window resize.
  */
 import type { DataAdapter } from "obsidian";
 import { debounce, normalizePath } from "obsidian";
@@ -282,7 +282,9 @@ export class AnnotationStore {
     private pdfBasename: string,
     pdfVaultPath: string,
     fingerprint?: string,
-    private loadFallbackPaths: string[] = []
+    private loadFallbackPaths: string[] = [],
+    private migrateFallbackOnLoad = false,
+    private sidecarBackupPath?: string
   ) {
     this.doc = { version: 1, pdf: pdfVaultPath, fingerprint, highlights: [] };
     this.flushDebounced = debounce(() => void this.flush(), 600, true);
@@ -293,18 +295,27 @@ export class AnnotationStore {
       (path, index, all) => path && all.indexOf(path) === index
     );
     for (const path of paths) {
+      let parsed: AnnotationDoc | null = null;
       try {
         if (!(await this.adapter.exists(path))) continue;
         const content = await this.adapter.read(path);
-        const parsed = parseAnnotations(content);
-        if (parsed) {
-          this.doc.highlights = parsed.highlights;
-          if (parsed.fingerprint) this.doc.fingerprint = parsed.fingerprint;
-          return;
-        }
+        parsed = parseAnnotations(content);
       } catch {
         /* try the next candidate path */
       }
+      if (!parsed) continue;
+      this.doc.highlights = parsed.highlights;
+      if (parsed.fingerprint) this.doc.fingerprint = parsed.fingerprint;
+      // Managed bundles use a stable canonical sidecar. When annotations are
+      // first found in an old path-derived sidecar, copy them into the bundle
+      // immediately instead of waiting for the next user edit. A failed copy
+      // is deliberately surfaced; silently showing an empty document would be
+      // much more dangerous. The legacy file remains a recovery snapshot.
+      if (this.migrateFallbackOnLoad && path !== this.sidecarPath) {
+        this.dirty = true;
+        await this.flush();
+      }
+      return;
     }
   }
 
@@ -342,6 +353,15 @@ export class AnnotationStore {
     }
   }
 
+  /** Keep human-readable metadata current after a vault rename. The sidecar
+   * itself is stable and does not move when it belongs to a managed bundle. */
+  setPdfPath(pdfVaultPath: string, pdfBasename: string): void {
+    if (this.doc.pdf === pdfVaultPath && this.pdfBasename === pdfBasename) return;
+    this.doc.pdf = pdfVaultPath;
+    this.pdfBasename = pdfBasename;
+    this.markDirty();
+  }
+
   private markDirty(): void {
     this.dirty = true;
     this.flushDebounced();
@@ -349,10 +369,26 @@ export class AnnotationStore {
 
   async flush(): Promise<void> {
     if (!this.dirty) return;
-    this.dirty = false;
     const out = serializeAnnotations(this.doc, this.pdfBasename);
-    await this.ensureParentFolder(this.sidecarPath);
-    await this.adapter.write(this.sidecarPath, out);
+    try {
+      await this.ensureParentFolder(this.sidecarPath);
+      if (this.sidecarBackupPath && (await this.adapter.exists(this.sidecarPath))) {
+        const current = await this.adapter.read(this.sidecarPath);
+        // Never replace the last-known-good recovery copy with a corrupt or
+        // partially-written canonical sidecar.
+        if (parseAnnotations(current)) {
+          await this.ensureParentFolder(this.sidecarBackupPath);
+          await this.adapter.write(this.sidecarBackupPath, current);
+        }
+      }
+      await this.adapter.write(this.sidecarPath, out);
+      this.dirty = false;
+    } catch (error) {
+      // Keep the in-memory document retryable after transient adapter/iCloud
+      // failures instead of falsely treating an unsuccessful write as saved.
+      this.dirty = true;
+      throw error;
+    }
   }
 
   private async ensureParentFolder(filePath: string): Promise<void> {
