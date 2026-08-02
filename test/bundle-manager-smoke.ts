@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { AnnotationStore, serializeAnnotations, type AnnotationDoc } from "../src/annotations";
-import { PdfBundleManager } from "../src/bundles";
+import { PdfBundleManager, sha256Hex } from "../src/bundles";
+import { copyForPdfJs } from "../src/pdf-bytes";
 import { TFile, normalizePath } from "./obsidian-stub";
 
 class MemoryAdapter {
@@ -199,6 +200,44 @@ async function main(): Promise<void> {
     replacement.fallbackAnnotationPaths,
     [],
     "a replacement PDF cannot inherit a mismatched legacy sidecar"
+  );
+
+  // Opening a document must not give away the bytes the bundle still needs.
+  // pdf.js transfers the buffer it receives, so passing a plain view over the
+  // caller's ArrayBuffer detaches it and prepare() then hashes zero bytes.
+  const transferFile = new TFile("Downloads/transferred.pdf") as any;
+  const transferBytes = new TextEncoder().encode("transferred PDF").buffer;
+  await vault.adapter.writeBinary(transferFile.path, transferBytes);
+  const handedToPdfJs = copyForPdfJs(transferBytes);
+  structuredClone(handedToPdfJs, { transfer: [handedToPdfJs.buffer] });
+  assert.equal(handedToPdfJs.byteLength, 0, "pdf.js keeps the copy it was given");
+  assert.notEqual(transferBytes.byteLength, 0, "the caller's PDF bytes survive getDocument");
+
+  const afterTransfer = await manager.prepare(transferFile, transferBytes, "fingerprint-c", {
+    storageMode: "folder",
+    storageFolder: "PDF annotations",
+  });
+  assert.notEqual(
+    afterTransfer.id,
+    await sha256Hex(new ArrayBuffer(0)),
+    "a document must never be identified by the empty-input digest"
+  );
+  assert.deepEqual(
+    new Uint8Array(await vault.adapter.readBinary(afterTransfer.backupPath)),
+    new Uint8Array(transferBytes),
+    "the verified backup holds the real PDF bytes"
+  );
+
+  const detached = new TextEncoder().encode("detached PDF").buffer;
+  structuredClone(detached, { transfer: [detached] });
+  await assert.rejects(
+    () =>
+      manager.prepare(transferFile, detached, "fingerprint-d", {
+        storageMode: "folder",
+        storageFolder: "PDF annotations",
+      }),
+    /empty PDF bytes/,
+    "detached PDF bytes are rejected instead of hashing to the empty digest"
   );
 
   console.log("bundle manager smoke test passed");

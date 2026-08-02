@@ -143,17 +143,40 @@ left untouched.
 ## Development
 
 ```bash
-npm install
+npm install     # or: yarn install
 npm run typecheck
+npm test
 npm run build
 ```
 
-`npm run build` type-checks the plugin, bundles `main.js`, and copies
-`main.js`, `manifest.json`, and `styles.css` into the configured local vault
-plugin directory used by this checkout.
+`npm run build` type-checks the plugin, bundles it, and writes the three release
+files (`main.js`, `manifest.json`, `styles.css`) into `dist/`. No vault is
+required to build.
 
-Set `LOCAL_PDF_ANNOTATOR_PLUGIN_DIR` to build into a staging directory without
-touching the installed Obsidian copy.
+### Installing into a vault while developing
+
+To have every build install itself into Obsidian, tell the build where your
+plugin folder is — either copy `.plugin-dir.example` to `.plugin-dir` and put the
+path on one line:
+
+```text
+/absolute/path/to/YourVault/.obsidian/plugins/local-pdf-annotator
+```
+
+…or set `LOCAL_PDF_ANNOTATOR_PLUGIN_DIR`, which takes precedence:
+
+```bash
+LOCAL_PDF_ANNOTATOR_PLUGIN_DIR=/tmp/staging npm run build
+```
+
+`.plugin-dir` and `dist/` are gitignored, so no machine-specific path is ever
+committed. With neither configured the build simply produces `dist/` and says so.
+
+The configured folder's **parent** must already exist — the build creates the
+plugin folder itself but never invents a vault around it, so a stale path from
+another machine fails immediately with a readable message.
+
+`npm run dev` runs the same pipeline in watch mode, reinstalling on every rebuild.
 
 ## Release Files
 
@@ -164,4 +187,8 @@ release must include:
 - `manifest.json`
 - `styles.css`
 
-The release tag must match the `version` field in `manifest.json`.
+`npm run build` puts exactly these three files in `dist/`, so the release assets
+are whatever `dist/` contains after a production build.
+
+The release tag must match the `version` field in `manifest.json` (and the entry
+added to `versions.json`).

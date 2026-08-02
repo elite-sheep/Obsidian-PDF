@@ -95,6 +95,15 @@ export class PdfBundleManager {
     fingerprint: string | undefined,
     legacyPathOptions: AnnotationPathOptions
   ): Promise<PdfBundleBinding> {
+    // A detached ArrayBuffer (e.g. one already transferred to a pdf.js worker)
+    // reports byteLength 0 and hashes to the empty-input digest, which would
+    // silently bind every document to a single shared bundle. Refuse instead.
+    if (!pdfData.byteLength) {
+      throw new Error(
+        `Refusing to create a PDF bundle for ${file.path} from empty PDF bytes ` +
+          `(the buffer is empty or was already handed to another consumer).`
+      );
+    }
     const hash = await sha256Hex(pdfData);
     let pending = this.pendingByHash.get(hash);
     if (!pending) {

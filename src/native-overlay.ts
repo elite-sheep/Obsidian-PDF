@@ -33,6 +33,7 @@
  */
 import { App, Menu, Notice, Plugin, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 import { pdfjsLib, initPdfEngine, createDedicatedWorker, LOG_TAG } from "./pdf-engine";
+import { copyForPdfJs } from "./pdf-bytes";
 import {
   AnnotationStore,
   DEFAULT_COLOR,
@@ -369,7 +370,9 @@ export class NativePdfOverlay {
     const data = await this.app.vault.readBinary(this.file);
     if (this.destroyed) return;
     this.pdfWorker = createDedicatedWorker();
-    const params: any = { data: new Uint8Array(data), useSystemFonts: true };
+    // pdf.js transfers the buffer it is given to its worker; `data` must stay
+    // intact for the managed bundle below (see pdf-bytes.ts).
+    const params: any = { data: copyForPdfJs(data), useSystemFonts: true };
     if (this.pdfWorker) params.worker = this.pdfWorker;
     this.pdfDoc = await pdfjsLib.getDocument(params).promise;
     if (this.destroyed) {
