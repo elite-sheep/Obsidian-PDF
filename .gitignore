@@ -3,3 +3,7 @@ node_modules/
 .DS_Store
 
 audit-renders/
+dist/
+
+# Per-machine Obsidian plugin install path used by esbuild.config.mjs.
+.plugin-dir

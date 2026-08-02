@@ -11,6 +11,7 @@
  */
 import { FileView, TFile, WorkspaceLeaf, Notice, Menu } from "obsidian";
 import { pdfjsLib, initPdfEngine, getPdfEngineStatus, createDedicatedWorker, LOG_TAG } from "./pdf-engine";
+import { copyForPdfJs } from "./pdf-bytes";
 import {
   AnnotationStore,
   DEFAULT_COLOR,
@@ -490,7 +491,9 @@ export class PdfAnnotatorView extends FileView {
       // Dedicated worker per document (never shared) so a 2nd open PDF can't
       // blank this one's canvas, and so we never touch Obsidian's global worker.
       this.pdfWorker = createDedicatedWorker();
-      const params: any = { data: new Uint8Array(data), useSystemFonts: true };
+      // pdf.js transfers the buffer it is given to its worker; `data` must stay
+      // intact for the managed bundle below (see pdf-bytes.ts).
+      const params: any = { data: copyForPdfJs(data), useSystemFonts: true };
       if (this.pdfWorker) params.worker = this.pdfWorker;
       const loadingTask = pdfjsLib.getDocument(params);
       this.pdfDoc = await loadingTask.promise;

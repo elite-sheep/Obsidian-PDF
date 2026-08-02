@@ -3,16 +3,67 @@ import process from "process";
 import fs from "fs";
 import path from "path";
 import { builtinModules, createRequire } from "module";
+import { fileURLToPath } from "url";
 
 const require = createRequire(import.meta.url);
 const prod = process.argv[2] === "production";
 
-// --- Confirmed install target (Vault A: the currently-open parent vault) -----
-const PLUGIN_DIR =
-  process.env.LOCAL_PDF_ANNOTATOR_PLUGIN_DIR ??
-  "/Users/tianchenhao/Library/Mobile Documents/iCloud~md~obsidian/Documents/.obsidian/plugins/local-pdf-annotator";
-const OUTFILE = path.join(PLUGIN_DIR, "main.js");
-fs.mkdirSync(PLUGIN_DIR, { recursive: true });
+// --- Build output ------------------------------------------------------------
+// Building and installing are separate steps. The build ALWAYS produces the three
+// release files in a repo-local dist/, so a fresh clone (or CI) can build with no
+// vault present and no machine-specific configuration.
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
+const DIST_DIR = path.join(ROOT, "dist");
+const OUTFILE = path.join(DIST_DIR, "main.js");
+const RELEASE_FILES = ["manifest.json", "styles.css"];
+fs.mkdirSync(DIST_DIR, { recursive: true });
+
+// --- Optional install target --------------------------------------------------
+// After each successful build the release files are mirrored into an Obsidian
+// plugin folder, if one is configured. Resolution order:
+//   1. LOCAL_PDF_ANNOTATOR_PLUGIN_DIR   (CI / one-off overrides)
+//   2. .plugin-dir                      (gitignored, one line — the usual case)
+//   3. nothing                          (build dist/ only, and say so)
+// A path is NEVER invented: the parent must already exist, so a stale or foreign
+// path fails with an actionable message instead of silently creating a junk tree
+// or dying with EACCES somewhere under another user's home directory.
+function resolvePluginDir() {
+  const fromEnv = process.env.LOCAL_PDF_ANNOTATOR_PLUGIN_DIR?.trim();
+  if (fromEnv) return { dir: path.resolve(fromEnv), source: "LOCAL_PDF_ANNOTATOR_PLUGIN_DIR" };
+
+  const configPath = path.join(ROOT, ".plugin-dir");
+  if (fs.existsSync(configPath)) {
+    const line = fs
+      .readFileSync(configPath, "utf8")
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l && !l.startsWith("#"));
+    if (line) return { dir: path.resolve(ROOT, line), source: ".plugin-dir" };
+  }
+
+  return null;
+}
+
+const INSTALL = resolvePluginDir();
+if (INSTALL) {
+  const parent = path.dirname(INSTALL.dir);
+  if (!fs.existsSync(parent)) {
+    throw new Error(
+      `[build] plugin install path from ${INSTALL.source} does not exist:\n` +
+        `          ${INSTALL.dir}\n` +
+        `        Its parent folder (${parent}) is missing, so this is almost certainly a\n` +
+        `        stale path from another machine. Point .plugin-dir or\n` +
+        `        LOCAL_PDF_ANNOTATOR_PLUGIN_DIR at <vault>/.obsidian/plugins/local-pdf-annotator,\n` +
+        `        or remove it to build into dist/ only.`
+    );
+  }
+  // Only the leaf plugin folder is ours to create — never the vault around it.
+  fs.mkdirSync(INSTALL.dir, { recursive: true });
+  console.log(`[build] installing to ${INSTALL.dir} (via ${INSTALL.source})`);
+} else {
+  console.log("[build] no plugin dir configured — building to dist/ only.");
+  console.log("[build] to install on each build, write the path into .plugin-dir");
+}
 
 // --- Resolve the SINGLE installed pdfjs-dist build ---------------------------
 // API and worker are pulled from the SAME installed package => identical version
@@ -354,22 +405,36 @@ const stripPdfJsDynamicScriptFallback = {
   },
 };
 
-// esbuild plugin: copy manifest + styles into the plugin dir after each build.
-const copyStatic = {
-  name: "copy-static",
+// esbuild plugin: complete dist/ with manifest + styles, then mirror the release
+// files into the configured plugin folder (if any). dist/ is always the source of
+// truth; installing is a copy on top of a build that already succeeded.
+const emitRelease = {
+  name: "emit-release",
   setup(build) {
     build.onEnd((result) => {
       if (result.errors.length) return;
-      for (const f of ["manifest.json", "styles.css"]) {
+      for (const f of RELEASE_FILES) {
         try {
-          fs.copyFileSync(path.resolve(f), path.join(PLUGIN_DIR, f));
+          fs.copyFileSync(path.join(ROOT, f), path.join(DIST_DIR, f));
         } catch (e) {
-          console.warn(`[build] could not copy ${f}: ${e.message}`);
+          console.warn(`[build] could not stage ${f}: ${e.message}`);
         }
       }
-      console.log(
-        `[build] -> ${OUTFILE} (+ manifest, styles)  @ ${new Date().toLocaleTimeString()}`
-      );
+
+      const stamp = new Date().toLocaleTimeString();
+      if (!INSTALL) {
+        console.log(`[build] -> ${DIST_DIR} (main.js, ${RELEASE_FILES.join(", ")})  @ ${stamp}`);
+        return;
+      }
+
+      for (const f of ["main.js", ...RELEASE_FILES]) {
+        try {
+          fs.copyFileSync(path.join(DIST_DIR, f), path.join(INSTALL.dir, f));
+        } catch (e) {
+          console.warn(`[build] could not install ${f}: ${e.message}`);
+        }
+      }
+      console.log(`[build] -> ${DIST_DIR} + installed to ${INSTALL.dir}  @ ${stamp}`);
     });
   },
 };
@@ -408,7 +473,7 @@ const buildOptions = {
     __PDFJS_BUILD_VERSION__: JSON.stringify(PDFJS_VERSION),
     "process.env.NODE_ENV": JSON.stringify(prod ? "production" : "development"),
   },
-  plugins: [stripPdfJsDynamicScriptFallback, inlinePdfWorker, copyStatic],
+  plugins: [stripPdfJsDynamicScriptFallback, inlinePdfWorker, emitRelease],
 };
 
 if (prod) {
