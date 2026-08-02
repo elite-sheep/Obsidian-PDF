@@ -1,12 +1,18 @@
 /**
  * annotations.ts — annotation data model + sidecar persistence.
  *
- * Storage: a human-readable Markdown sidecar. Managed document bundles give it
- * a path-independent canonical location; central and old beside-the-PDF paths
- * remain supported as migration sources. It has a prose list (for skimming /
- * future back-links) AND a fenced ```json block that is the machine source of
- * truth. Geometry is stored in PDF USER-SPACE units (origin bottom-left, y-up)
- * so it is scale-independent and survives zoom / re-render / window resize.
+ * Storage: a human-readable Markdown sidecar located FROM the PDF's vault path
+ * (beside it by default, or mirrored under a folder). It has a prose list (for
+ * skimming / future back-links) AND a fenced ```json block that is the machine
+ * source of truth. Geometry is stored in PDF USER-SPACE units (origin
+ * bottom-left, y-up) so it is scale-independent and survives zoom / re-render /
+ * window resize.
+ *
+ * The path only LOCATES a sidecar; it never proves the sidecar belongs to the
+ * PDF now sitting at that path. That job belongs to the document metadata
+ * (`sha256`, `pageCount`, `byteLength`) stamped into the doc: document-binding.ts
+ * compares it against the file on disk before any of this is shown to the user.
+ * Every field is optional so sidecars written before this existed still parse.
  */
 import type { DataAdapter } from "obsidian";
 import { debounce, normalizePath } from "obsidian";
@@ -81,14 +87,27 @@ export interface Highlight {
   source?: "manual" | "import";
 }
 
-export interface AnnotationDoc {
+/**
+ * Identity of the PDF these annotations were written against. `sha256` is the
+ * authoritative check; `pageCount` grades how severe a mismatch is (same page
+ * count ⇒ almost certainly a re-encode of the same document, so the stored
+ * user-space geometry still lands correctly); `byteLength` is a cheap
+ * pre-check. All optional — absent means "written before this was recorded".
+ */
+export interface DocumentMetadata {
+  sha256?: string;
+  pageCount?: number;
+  byteLength?: number;
+}
+
+export interface AnnotationDoc extends DocumentMetadata {
   version: 1;
   pdf: string; // vault-relative path of the PDF
   fingerprint?: string; // pdf.js document fingerprint (sanity only)
   highlights: Highlight[];
 }
 
-export type AnnotationStorageMode = "folder" | "beside-pdf";
+export type AnnotationStorageMode = "hidden-beside" | "folder" | "beside-pdf";
 
 export interface AnnotationPathOptions {
   storageMode?: AnnotationStorageMode;
@@ -96,6 +115,14 @@ export interface AnnotationPathOptions {
 }
 
 export const DEFAULT_ANNOTATION_FOLDER = "PDF annotations";
+
+/**
+ * Dot-folder holding sidecars in "hidden-beside" mode. Obsidian keeps files
+ * under a leading-dot folder out of the file explorer AND out of the vault
+ * index, so nothing here is a TFile — every read, write, move, and delete must
+ * go through the DataAdapter (see document-binding.ts).
+ */
+export const HIDDEN_ANNOTATION_FOLDER = ".annotations";
 
 /**
  * The COLOR/meaning palette. Fills should read like real marker/pen colors,
@@ -191,6 +218,20 @@ export function legacySidecarPathFor(pdfVaultPath: string): string {
 }
 
 /**
+ * Hidden sidecar path: a ".annotations" folder in the PDF's own directory.
+ * "Papers/Novel.pdf" -> "Papers/.annotations/Novel.annotations.md".
+ */
+export function hiddenSidecarPathFor(pdfVaultPath: string): string {
+  const stem = pdfAnnotationStem(pdfVaultPath);
+  const parts = stem.split("/");
+  const name = parts.pop() ?? stem;
+  const dir = parts.join("/");
+  return normalizePath(
+    `${dir ? `${dir}/` : ""}${HIDDEN_ANNOTATION_FOLDER}/${name}.annotations.md`
+  );
+}
+
+/**
  * Derive the active sidecar path from a PDF's vault path and storage settings.
  *
  * Folder mode mirrors the PDF's vault-relative path under the annotation folder:
@@ -204,7 +245,29 @@ export function sidecarPathFor(
     const folder = normalizeAnnotationStorageFolder(options.storageFolder);
     return normalizePath(`${folder}/${pdfAnnotationStem(pdfVaultPath)}.annotations.md`);
   }
-  return legacySidecarPathFor(pdfVaultPath);
+  if (options.storageMode === "beside-pdf") return legacySidecarPathFor(pdfVaultPath);
+  return hiddenSidecarPathFor(pdfVaultPath);
+}
+
+/** Every mode's path for one PDF, for cross-mode migration lookups. */
+export function allSidecarPathsFor(
+  pdfVaultPath: string,
+  storageFolder?: string
+): string[] {
+  const modes: AnnotationPathOptions[] = [
+    { storageMode: "hidden-beside" },
+    { storageMode: "beside-pdf" },
+    { storageMode: "folder", storageFolder },
+  ];
+  return Array.from(new Set(modes.map((mode) => sidecarPathFor(pdfVaultPath, mode))));
+}
+
+/**
+ * Rolling last-known-good copy, kept next to whichever sidecar it protects:
+ * "Papers/x.annotations.md" -> "Papers/x.annotations.previous.md".
+ */
+export function sidecarBackupPathFor(sidecarPath: string): string {
+  return normalizePath(sidecarPath).replace(/\.md$/i, "") + ".previous.md";
 }
 
 export function serializeAnnotations(doc: AnnotationDoc, pdfBasename: string): string {
@@ -271,22 +334,47 @@ export function parseAnnotations(content: string): AnnotationDoc | null {
 /**
  * In-memory annotation store with debounced autosave to the sidecar.
  */
+export interface AnnotationStoreOptions {
+  adapter: DataAdapter;
+  /** Canonical sidecar path, derived from the PDF's vault path. */
+  sidecarPath: string;
+  pdfBasename: string;
+  pdfVaultPath: string;
+  fingerprint?: string;
+  /** Older/other-mode locations to import from, in priority order. */
+  loadFallbackPaths?: string[];
+  /** Copy a fallback hit into the canonical path on load rather than waiting. */
+  migrateFallbackOnLoad?: boolean;
+  sidecarBackupPath?: string;
+  /** Identity of the PDF being opened; restamped whenever it drifts. */
+  document?: DocumentMetadata;
+}
+
 export class AnnotationStore {
   doc: AnnotationDoc;
+  private adapter: DataAdapter;
+  private sidecarPath: string;
+  private pdfBasename: string;
+  private loadFallbackPaths: string[];
+  private migrateFallbackOnLoad: boolean;
+  private sidecarBackupPath?: string;
   private dirty = false;
   private flushDebounced: () => void;
 
-  constructor(
-    private adapter: DataAdapter,
-    private sidecarPath: string,
-    private pdfBasename: string,
-    pdfVaultPath: string,
-    fingerprint?: string,
-    private loadFallbackPaths: string[] = [],
-    private migrateFallbackOnLoad = false,
-    private sidecarBackupPath?: string
-  ) {
-    this.doc = { version: 1, pdf: pdfVaultPath, fingerprint, highlights: [] };
+  constructor(options: AnnotationStoreOptions) {
+    this.adapter = options.adapter;
+    this.sidecarPath = options.sidecarPath;
+    this.pdfBasename = options.pdfBasename;
+    this.loadFallbackPaths = options.loadFallbackPaths ?? [];
+    this.migrateFallbackOnLoad = options.migrateFallbackOnLoad ?? false;
+    this.sidecarBackupPath = options.sidecarBackupPath;
+    this.doc = {
+      version: 1,
+      pdf: options.pdfVaultPath,
+      fingerprint: options.fingerprint,
+      ...options.document,
+      highlights: [],
+    };
     this.flushDebounced = debounce(() => void this.flush(), 600, true);
   }
 
@@ -306,16 +394,51 @@ export class AnnotationStore {
       if (!parsed) continue;
       this.doc.highlights = parsed.highlights;
       if (parsed.fingerprint) this.doc.fingerprint = parsed.fingerprint;
-      // Managed bundles use a stable canonical sidecar. When annotations are
-      // first found in an old path-derived sidecar, copy them into the bundle
-      // immediately instead of waiting for the next user edit. A failed copy
-      // is deliberately surfaced; silently showing an empty document would be
-      // much more dangerous. The legacy file remains a recovery snapshot.
-      if (this.migrateFallbackOnLoad && path !== this.sidecarPath) {
+      // The CURRENT document's identity always wins: the caller has already
+      // decided (via document-binding.ts) that these annotations belong to the
+      // file on disk, so a stale or absent stamp is corrected rather than
+      // trusted. Restamping is what makes the next open compare cleanly.
+      const restamp =
+        this.doc.sha256 !== parsed.sha256 ||
+        this.doc.pageCount !== parsed.pageCount ||
+        this.doc.byteLength !== parsed.byteLength;
+      // When annotations are found in an older/other-mode location, copy them
+      // to the canonical path immediately instead of waiting for the next user
+      // edit. A failed copy is deliberately surfaced; silently showing an empty
+      // document would be much more dangerous. The source file is left in place
+      // as a recovery snapshot.
+      const migrating = this.migrateFallbackOnLoad && path !== this.sidecarPath;
+      if (migrating || restamp) {
         this.dirty = true;
-        await this.flush();
+        // Only a migration must land before the user can edit; a restamp can
+        // ride along with the next debounced save.
+        if (migrating) await this.flush();
+        else this.flushDebounced();
       }
+      if (migrating) await this.retireMigrationSource(path);
       return;
+    }
+  }
+
+  /**
+   * Rename a sidecar we just copied out of, so it can never be mistaken for
+   * current state later. Without this, switching storage modes twice finds the
+   * stale pre-migration copy sitting at the newly-canonical path and silently
+   * reverts every edit made in between.
+   *
+   * Renamed, not deleted — it stays a recovery snapshot. The rolling
+   * `.previous.md` backup is exempt: recovering from it is a normal event, and
+   * retiring it would dismantle the backup chain.
+   */
+  private async retireMigrationSource(path: string): Promise<void> {
+    if (path === this.sidecarBackupPath) return;
+    const target = normalizePath(path).replace(/\.md$/i, "") + ".migrated.md";
+    try {
+      if (await this.adapter.exists(target)) return;
+      await this.adapter.rename(path, target);
+    } catch {
+      // The annotations are already safe at the canonical path; failing to tidy
+      // the source must not stop the document from opening.
     }
   }
 
@@ -353,13 +476,22 @@ export class AnnotationStore {
     }
   }
 
-  /** Keep human-readable metadata current after a vault rename. The sidecar
-   * itself is stable and does not move when it belongs to a managed bundle. */
+  /** Keep human-readable metadata current after a vault rename. */
   setPdfPath(pdfVaultPath: string, pdfBasename: string): void {
     if (this.doc.pdf === pdfVaultPath && this.pdfBasename === pdfBasename) return;
     this.doc.pdf = pdfVaultPath;
     this.pdfBasename = pdfBasename;
     this.markDirty();
+  }
+
+  /**
+   * Re-point an open store after its sidecar was moved on disk to follow a
+   * renamed PDF. The caller performs the move; this only updates where the
+   * next flush writes, so a pending edit cannot recreate the old path.
+   */
+  setSidecarPaths(sidecarPath: string, sidecarBackupPath?: string): void {
+    this.sidecarPath = sidecarPath;
+    this.sidecarBackupPath = sidecarBackupPath;
   }
 
   private markDirty(): void {

@@ -9,7 +9,8 @@
  *     viewer without replacing it (see native-overlay.ts)
  */
 import {
-  FuzzySuggestModal,
+  App,
+  Modal,
   Plugin,
   TFile,
   WorkspaceLeaf,
@@ -26,45 +27,48 @@ import {
   type AnnotationPathOptions,
   type AnnotationStorageMode,
 } from "./annotations";
-import {
-  DEFAULT_RECOVERY_FOLDER,
-  PDF_BUNDLE_LIBRARY,
-  PdfBundleManager,
-  type PdfBundleBinding,
-} from "./bundles";
+import { DocumentBinder } from "./document-binding";
 
 interface LpaSettings {
   /** Override Obsidian's core PDF viewer so clicking a PDF opens this view. */
   registerAsDefaultPdfHandler: boolean;
   /** Inject annotation mode into the native PDF view (experimental). */
   enableNativeOverlay: boolean;
-  /** Legacy sidecar mode retained only for migration compatibility. */
+  /** Turn annotation mode on by itself for PDFs that already have marks. */
+  autoEnableAnnotationMode: boolean;
+  /** Where sidecars live: beside each PDF, or mirrored under one folder. */
   annotationStorageMode: AnnotationStorageMode;
-  /** Vault-relative folder searched for legacy sidecars and used for exports. */
+  /** Vault-relative folder used by "folder" mode and for exports. */
   annotationStorageFolder: string;
 }
 
 const DEFAULT_SETTINGS: LpaSettings = {
   registerAsDefaultPdfHandler: false,
   enableNativeOverlay: true,
-  annotationStorageMode: "folder",
+  autoEnableAnnotationMode: true,
+  // A ".annotations" folder in the PDF's own directory: same locality as the
+  // PDF (a folder moved in Finder takes both), without a stray Markdown file
+  // appearing in the file explorer next to every paper.
+  annotationStorageMode: "hidden-beside",
   annotationStorageFolder: DEFAULT_ANNOTATION_FOLDER,
 };
 
 function coerceAnnotationStorageMode(value: string): AnnotationStorageMode {
-  return value === "beside-pdf" ? "beside-pdf" : "folder";
+  if (value === "folder") return "folder";
+  if (value === "beside-pdf") return "beside-pdf";
+  return "hidden-beside";
 }
 
 export default class LocalPdfAnnotatorPlugin extends Plugin {
   settings!: LpaSettings;
   nativeOverlays!: NativeOverlayManager;
-  bundleManager!: PdfBundleManager;
+  binder!: DocumentBinder;
   private replacingCorePdfView = false;
   private nativePdfRefreshRaf: number | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
-    this.bundleManager = new PdfBundleManager(this.app);
+    this.binder = new DocumentBinder(this.app);
 
     // Configure + self-verify our bundled pdf.js worker up front so the console
     // shows the version match before any PDF is opened.
@@ -76,14 +80,15 @@ export default class LocalPdfAnnotatorPlugin extends Plugin {
     this.registerView(
       VIEW_TYPE_PDF_ANNOTATOR,
       (leaf: WorkspaceLeaf) =>
-        new PdfAnnotatorView(leaf, () => this.annotationPathOptions(), this.bundleManager)
+        new PdfAnnotatorView(leaf, () => this.annotationPathOptions(), this.binder)
     );
 
     this.nativeOverlays = new NativeOverlayManager(
       this,
       () => this.settings.enableNativeOverlay,
+      () => this.settings.autoEnableAnnotationMode,
       () => this.annotationPathOptions(),
-      this.bundleManager
+      this.binder
     );
 
     // Trigger 1: command palette.
@@ -132,27 +137,18 @@ export default class LocalPdfAnnotatorPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "restore-backed-up-pdf",
-      name: "Restore a PDF from annotation backup",
-      callback: async () => {
-        const bundles = await this.bundleManager.listBundles();
-        if (!bundles.length) {
-          new Notice("PDF Annotator: no managed PDF backups found.");
-          return;
-        }
-        new PdfBackupRestoreModal(this, bundles).open();
-      },
-    });
-
-    this.addCommand({
       id: "export-current-pdf-annotations",
       name: "Export annotations for current PDF",
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
         if (!(file instanceof TFile) || file.extension !== "pdf") return false;
         if (!checking) {
-          void this.bundleManager
-            .exportAnnotations(file, `${this.settings.annotationStorageFolder}/Exports`)
+          void this.binder
+            .exportAnnotations(
+              file,
+              `${this.settings.annotationStorageFolder}/Exports`,
+              this.annotationPathOptions()
+            )
             .then((path) => new Notice(`PDF Annotator: exported ${path}`))
             .catch((e: any) => {
               console.error(`${LOG_TAG} failed to export PDF annotations`, e);
@@ -163,31 +159,18 @@ export default class LocalPdfAnnotatorPlugin extends Plugin {
       },
     });
 
+    // Migration off the retired bundle layout. Deliberately two commands: no
+    // duplicated PDF is deleted until its annotations are provably out.
     this.addCommand({
-      id: "verify-pdf-annotation-backups",
-      name: "Verify all PDF annotation backups",
-      callback: async () => {
-        const bundles = await this.bundleManager.listBundles();
-        if (!bundles.length) {
-          new Notice("PDF Annotator: no managed PDF backups found.");
-          return;
-        }
-        let failed = 0;
-        for (const bundle of bundles) {
-          const result = await this.bundleManager.verifyBundle(bundle);
-          if (!result.ok) {
-            failed++;
-            console.error(
-              `${LOG_TAG} backup verification failed for ${bundle.manifest.originalName}: ${result.reason}`
-            );
-          }
-        }
-        new Notice(
-          failed
-            ? `PDF Annotator: ${failed} of ${bundles.length} backups failed verification — see console.`
-            : `PDF Annotator: verified ${bundles.length} PDF backup${bundles.length === 1 ? "" : "s"}.`
-        );
-      },
+      id: "migrate-annotations-out-of-bundles",
+      name: "Migrate annotations out of managed bundles",
+      callback: () => void this.migrateLegacyBundles(),
+    });
+
+    this.addCommand({
+      id: "reclaim-annotation-backup-space",
+      name: "Reclaim space from annotation backups",
+      callback: () => void this.reclaimLegacyBackups(),
     });
 
     // Trigger 2: ordinary file clicks. Obsidian's core PDF view owns the "pdf"
@@ -210,23 +193,24 @@ export default class LocalPdfAnnotatorPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
         if (!(file instanceof TFile) || file.extension !== "pdf") return;
-        void this.bundleManager.onPdfRenamed(file, oldPath).catch((e) =>
-          console.error(`${LOG_TAG} failed to update PDF bundle path metadata`, e)
-        );
-        for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_PDF_ANNOTATOR)) {
-          const view = leaf.view;
-          if (view instanceof PdfAnnotatorView) view.syncPdfPath(file);
-        }
-        this.nativeOverlays.syncPdfPath(file);
-        this.scheduleNativePdfRefresh();
+        void this.onPdfRenamed(file, oldPath);
       })
     );
+    // Deleting a PDF trashes its annotations. This must stay bound to the
+    // DELETE EVENT and never to a "file is missing" check: a half-synced vault
+    // or a move made in Finder is indistinguishable from a deletion, and this
+    // is the only irreversible operation in the plugin.
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
         if (!(file instanceof TFile) || file.extension !== "pdf") return;
-        void this.bundleManager.onPdfDeleted(file.path).catch((e) =>
-          console.error(`${LOG_TAG} failed to update deleted PDF bundle metadata`, e)
-        );
+        void this.binder
+          .onPdfDeleted(file.path, this.annotationPathOptions())
+          .then((trashed) => {
+            if (trashed.length) {
+              new Notice(`PDF Annotator: moved annotations for ${file.name} to trash.`);
+            }
+          })
+          .catch((e) => console.error(`${LOG_TAG} failed to trash annotations`, e));
       })
     );
     this.app.workspace.onLayoutReady(() => this.scheduleNativePdfRefresh());
@@ -338,6 +322,140 @@ export default class LocalPdfAnnotatorPlugin extends Plugin {
       storageFolder: this.settings.annotationStorageFolder,
     };
   }
+
+  /** Move the sidecars with the PDF, then re-point any open store at them. */
+  private async onPdfRenamed(file: TFile, oldPath: string): Promise<void> {
+    let sidecar: { sidecarPath: string; sidecarBackupPath: string } | undefined;
+    try {
+      sidecar = (await this.binder.onPdfRenamed(file, oldPath, this.annotationPathOptions())) ?? undefined;
+    } catch (e: any) {
+      // The sidecar stays at the old path and is still discoverable there, so
+      // this is recoverable — but the user needs to know it did not follow.
+      console.error(`${LOG_TAG} failed to move annotations with the renamed PDF`, e);
+      new Notice(`PDF Annotator: annotations did not follow ${file.name} — ${e?.message ?? e}`);
+    }
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_PDF_ANNOTATOR)) {
+      const view = leaf.view;
+      if (view instanceof PdfAnnotatorView) view.syncPdfPath(file, sidecar);
+    }
+    this.nativeOverlays.syncPdfPath(file, sidecar);
+    this.scheduleNativePdfRefresh();
+  }
+
+  private async migrateLegacyBundles(): Promise<void> {
+    try {
+      const bundles = (await this.binder.listLegacyBundles()).filter((b) => b.hasAnnotations);
+      if (!bundles.length) {
+        new Notice("PDF Annotator: no bundled annotations left to migrate.");
+        return;
+      }
+      const skipped: string[] = [];
+      let migrated = 0;
+      for (const bundle of bundles) {
+        const result = await this.binder.migrateLegacyBundle(bundle, this.annotationPathOptions());
+        if (result.kind === "migrated") migrated++;
+        else skipped.push(result.reason);
+      }
+      for (const reason of skipped) console.warn(`${LOG_TAG} bundle not migrated: ${reason}`);
+      new Notice(
+        skipped.length
+          ? `PDF Annotator: migrated ${migrated} of ${bundles.length}; ${skipped.length} skipped — see console.`
+          : `PDF Annotator: migrated ${migrated} annotation file${migrated === 1 ? "" : "s"}.`
+      );
+    } catch (e: any) {
+      console.error(`${LOG_TAG} bundle migration failed`, e);
+      new Notice(`PDF Annotator: migration failed — ${e?.message ?? e}`);
+    }
+  }
+
+  private async reclaimLegacyBackups(): Promise<void> {
+    try {
+      const bundles = await this.binder.listLegacyBundles();
+      const withBackups = bundles.filter((b) => b.backupBytes > 0);
+      if (!withBackups.length) {
+        new Notice("PDF Annotator: no duplicated PDF copies to reclaim.");
+        return;
+      }
+      // Refuse while any bundle still holds the only copy of its annotations.
+      const unmigrated = bundles.filter((b) => b.hasAnnotations);
+      if (unmigrated.length) {
+        new Notice(
+          `PDF Annotator: ${unmigrated.length} bundle(s) still hold annotations. ` +
+            `Run “Migrate annotations out of managed bundles” first.`
+        );
+        return;
+      }
+      const total = withBackups.reduce((sum, b) => sum + b.backupBytes, 0);
+      const confirmed = await new Promise<boolean>((resolve) => {
+        new ConfirmModal(
+          this.app,
+          "Reclaim space from annotation backups",
+          `Delete ${withBackups.length} duplicated PDF cop${withBackups.length === 1 ? "y" : "ies"} ` +
+            `(${formatBytes(total)})? Your original PDFs and annotations are not touched.`,
+          "Delete copies",
+          resolve
+        ).open();
+      });
+      if (!confirmed) return;
+      const reclaimed = await this.binder.reclaimLegacyBackups(withBackups);
+      new Notice(`PDF Annotator: reclaimed ${formatBytes(reclaimed)}.`);
+    } catch (e: any) {
+      console.error(`${LOG_TAG} reclaiming backup space failed`, e);
+      new Notice(`PDF Annotator: could not reclaim space — ${e?.message ?? e}`);
+    }
+  }
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value.toFixed(1)} ${units[unit]}`;
+}
+
+class ConfirmModal extends Modal {
+  private decided = false;
+
+  constructor(
+    app: App,
+    private titleText: string,
+    private bodyText: string,
+    private confirmText: string,
+    private resolve: (confirmed: boolean) => void
+  ) {
+    super(app);
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: this.titleText });
+    contentEl.createEl("p", { text: this.bodyText });
+    new Setting(contentEl)
+      .addButton((b) =>
+        b
+          .setButtonText(this.confirmText)
+          .setWarning()
+          .onClick(() => this.finish(true))
+      )
+      .addButton((b) => b.setButtonText("Cancel").onClick(() => this.finish(false)));
+  }
+
+  private finish(confirmed: boolean): void {
+    this.decided = true;
+    this.resolve(confirmed);
+    this.close();
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+    if (!this.decided) this.resolve(false);
+  }
 }
 
 class LpaSettingTab extends PluginSettingTab {
@@ -350,19 +468,50 @@ class LpaSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     new Setting(containerEl)
-      .setName("Legacy annotation folder")
+      .setName("Where annotations are stored")
       .setDesc(
-        `Existing path-based sidecars are imported from this folder. New annotations and a verified PDF backup are kept together in ${PDF_BUNDLE_LIBRARY}.`
+        "Hidden folder keeps sidecars in a “.annotations” folder inside the PDF's own " +
+          "directory, so nothing extra shows up in the file explorer. Sidecars written " +
+          "under any of these settings are still found and imported automatically, so " +
+          "switching is safe."
       )
-      .addText((t) => {
-        t
-          .setPlaceholder(DEFAULT_ANNOTATION_FOLDER)
-          .setValue(this.plugin.settings.annotationStorageFolder)
+      .addDropdown((d) =>
+        d
+          .addOption("hidden-beside", "Hidden folder beside the PDF (.annotations)")
+          .addOption("beside-pdf", "Visible, next to the PDF")
+          .addOption("folder", "In one annotation folder")
+          .setValue(this.plugin.settings.annotationStorageMode)
           .onChange(async (v) => {
-            this.plugin.settings.annotationStorageFolder = normalizeAnnotationStorageFolder(v);
+            this.plugin.settings.annotationStorageMode = coerceAnnotationStorageMode(v);
             await this.plugin.saveSettings();
-          });
+            this.display();
+          })
+      );
+
+    if (this.plugin.settings.annotationStorageMode === "hidden-beside") {
+      containerEl.createEl("p", {
+        cls: "setting-item-description",
+        text:
+          "Hidden files are not indexed by Obsidian: annotation sidecars will not appear " +
+          "in search or the graph, and some sync tools skip dot-folders. If yours does, " +
+          "include “.annotations” explicitly, or choose a visible location above.",
       });
+    }
+
+    if (this.plugin.settings.annotationStorageMode === "folder") {
+      new Setting(containerEl)
+        .setName("Annotation folder")
+        .setDesc("Sidecars mirror each PDF's vault path under this folder.")
+        .addText((t) => {
+          t
+            .setPlaceholder(DEFAULT_ANNOTATION_FOLDER)
+            .setValue(this.plugin.settings.annotationStorageFolder)
+            .onChange(async (v) => {
+              this.plugin.settings.annotationStorageFolder = normalizeAnnotationStorageFolder(v);
+              await this.plugin.saveSettings();
+            });
+        });
+    }
 
     new Setting(containerEl)
       .setName("Annotate inside the native PDF view (experimental)")
@@ -377,6 +526,20 @@ class LpaSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
           if (v) this.plugin.nativeOverlays.refresh();
           else this.plugin.nativeOverlays.disable();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Open annotation mode automatically")
+      .setDesc(
+        "When a PDF already has annotations, turn annotation mode on as it opens so the marks " +
+          "are visible right away. PDFs with no annotations are unaffected and stay in the " +
+          "plain native viewer."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.autoEnableAnnotationMode).onChange(async (v) => {
+          this.plugin.settings.autoEnableAnnotationMode = v;
+          await this.plugin.saveSettings();
         })
       );
 
@@ -397,44 +560,9 @@ class LpaSettingTab extends PluginSettingTab {
     containerEl.createEl("p", {
       cls: "setting-item-description",
       text:
-        "The command “Open current PDF in annotator” remains available as a stable custom-view fallback.",
+        "The command “Open current PDF in annotator” remains available as a stable custom-view fallback. " +
+        "Deleting a PDF moves its annotations to the trash along with it.",
     });
   }
 }
 
-class PdfBackupRestoreModal extends FuzzySuggestModal<PdfBundleBinding> {
-  constructor(
-    private plugin: LocalPdfAnnotatorPlugin,
-    private bundles: PdfBundleBinding[]
-  ) {
-    super(plugin.app);
-    this.setPlaceholder("Choose a backed-up PDF to restore");
-  }
-
-  getItems(): PdfBundleBinding[] {
-    return this.bundles;
-  }
-
-  getItemText(binding: PdfBundleBinding): string {
-    const path = binding.manifest.currentPath ?? "working copy deleted";
-    return `${binding.manifest.originalName} — ${path}`;
-  }
-
-  onChooseItem(binding: PdfBundleBinding): void {
-    void this.restore(binding);
-  }
-
-  private async restore(binding: PdfBundleBinding): Promise<void> {
-    try {
-      const file = await this.plugin.bundleManager.restoreBundle(
-        binding,
-        DEFAULT_RECOVERY_FOLDER
-      );
-      new Notice(`PDF Annotator: restored ${file.path}`);
-      await this.plugin.openInAnnotator(file, "tab");
-    } catch (e: any) {
-      console.error(`${LOG_TAG} failed to restore PDF backup`, e);
-      new Notice(`PDF Annotator: restore failed — ${e?.message ?? e}`);
-    }
-  }
-}

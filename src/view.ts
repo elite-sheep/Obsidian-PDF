@@ -24,13 +24,15 @@ import {
   legacySidecarPathFor,
   sidecarPathFor,
   type AnnotationPathOptions,
+  type AnnotationStoreOptions,
   type Highlight,
   type MarkStyle,
   type PdfRect,
 } from "./annotations";
 import { buildDocIndex, anchorQuote } from "./anchor";
 import { parseLegacyNote, targetBasename, type LegacyAnnotation } from "./legacy-import";
-import { PdfBundleManager } from "./bundles";
+import { DocumentBinder } from "./document-binding";
+import { resolveDocumentChange } from "./document-change";
 
 export const VIEW_TYPE_PDF_ANNOTATOR = "local-pdf-annotator-view";
 
@@ -178,7 +180,7 @@ export class PdfAnnotatorView extends FileView {
   constructor(
     leaf: WorkspaceLeaf,
     private getAnnotationPathOptions: () => AnnotationPathOptions = () => ({}),
-    private bundleManager?: PdfBundleManager
+    private binder?: DocumentBinder
   ) {
     super(leaf);
     this.navigation = true;
@@ -515,35 +517,46 @@ export class PdfAnnotatorView extends FileView {
       ? this.pdfDoc.fingerprints[0]
       : this.pdfDoc.fingerprint;
     const pathOptions = this.getAnnotationPathOptions();
-    let annotationPath = sidecarPathFor(file.path, pathOptions);
-    let fallbackPaths = [legacySidecarPathFor(file.path)];
-    let migrateFallback = false;
-    let annotationBackupPath: string | undefined;
-    if (this.bundleManager) {
+    let storeOptions: AnnotationStoreOptions = {
+      adapter: this.app.vault.adapter,
+      sidecarPath: sidecarPathFor(file.path, pathOptions),
+      pdfBasename: file.basename,
+      pdfVaultPath: file.path,
+      fingerprint,
+      loadFallbackPaths: [legacySidecarPathFor(file.path)],
+    };
+    if (this.binder) {
+      let binding;
       try {
-        const binding = await this.bundleManager.prepare(file, data, fingerprint, pathOptions);
-        annotationPath = binding.annotationPath;
-        fallbackPaths = binding.fallbackAnnotationPaths;
-        migrateFallback = true;
-        annotationBackupPath = binding.annotationBackupPath;
+        binding = await this.binder.prepare(file, data, {
+          fingerprint,
+          pageCount: this.pdfDoc.numPages,
+          pathOptions,
+        });
       } catch (e: any) {
-        console.error(`${LOG_TAG} could not prepare managed PDF bundle`, e);
+        console.error(`${LOG_TAG} could not resolve the annotation sidecar`, e);
         this.setError(
-          `Could not create a verified PDF backup. Annotation mode was not opened:\n${e?.message ?? e}`
+          `Could not resolve where to store annotations. Annotation mode was not opened:\n${e?.message ?? e}`
         );
         return;
       }
+      // The PDF may no longer be the one these annotations describe; only the
+      // user can settle that (see document-change.ts).
+      if (!(await resolveDocumentChange(this.app, file, binding))) {
+        this.setError("Annotation mode was not opened for this PDF.");
+        return;
+      }
+      if (token !== this.loadToken) return;
+      storeOptions = {
+        ...storeOptions,
+        sidecarPath: binding.sidecarPath,
+        loadFallbackPaths: binding.fallbackPaths,
+        migrateFallbackOnLoad: true,
+        sidecarBackupPath: binding.sidecarBackupPath,
+        document: binding.document,
+      };
     }
-    this.store = new AnnotationStore(
-      this.app.vault.adapter,
-      annotationPath,
-      file.basename,
-      file.path,
-      fingerprint,
-      fallbackPaths,
-      migrateFallback,
-      annotationBackupPath
-    );
+    this.store = new AnnotationStore(storeOptions);
     await this.store.load();
 
     await this.buildPages();
@@ -555,9 +568,11 @@ export class PdfAnnotatorView extends FileView {
     this.teardownDocument();
   }
 
-  syncPdfPath(file: TFile): void {
+  /** Follow a vault rename. `sidecar` is set once the files have been moved. */
+  syncPdfPath(file: TFile, sidecar?: { sidecarPath: string; sidecarBackupPath: string }): void {
     if (this.file !== file && this.file?.path !== file.path) return;
     this.titleEl?.setText(file.basename);
+    if (sidecar) this.store?.setSidecarPaths(sidecar.sidecarPath, sidecar.sidecarBackupPath);
     this.store?.setPdfPath(file.path, file.basename);
   }
 
