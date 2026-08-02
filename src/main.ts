@@ -34,6 +34,8 @@ interface LpaSettings {
   registerAsDefaultPdfHandler: boolean;
   /** Inject annotation mode into the native PDF view (experimental). */
   enableNativeOverlay: boolean;
+  /** Turn annotation mode on by itself for PDFs that already have marks. */
+  autoEnableAnnotationMode: boolean;
   /** Where sidecars live: beside each PDF, or mirrored under one folder. */
   annotationStorageMode: AnnotationStorageMode;
   /** Vault-relative folder used by "folder" mode and for exports. */
@@ -43,6 +45,7 @@ interface LpaSettings {
 const DEFAULT_SETTINGS: LpaSettings = {
   registerAsDefaultPdfHandler: false,
   enableNativeOverlay: true,
+  autoEnableAnnotationMode: true,
   // A ".annotations" folder in the PDF's own directory: same locality as the
   // PDF (a folder moved in Finder takes both), without a stray Markdown file
   // appearing in the file explorer next to every paper.
@@ -83,6 +86,7 @@ export default class LocalPdfAnnotatorPlugin extends Plugin {
     this.nativeOverlays = new NativeOverlayManager(
       this,
       () => this.settings.enableNativeOverlay,
+      () => this.settings.autoEnableAnnotationMode,
       () => this.annotationPathOptions(),
       this.binder
     );
@@ -522,6 +526,20 @@ class LpaSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
           if (v) this.plugin.nativeOverlays.refresh();
           else this.plugin.nativeOverlays.disable();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Open annotation mode automatically")
+      .setDesc(
+        "When a PDF already has annotations, turn annotation mode on as it opens so the marks " +
+          "are visible right away. PDFs with no annotations are unaffected and stay in the " +
+          "plain native viewer."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.autoEnableAnnotationMode).onChange(async (v) => {
+          this.plugin.settings.autoEnableAnnotationMode = v;
+          await this.plugin.saveSettings();
         })
       );
 

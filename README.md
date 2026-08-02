@@ -112,6 +112,10 @@ The PDF's path locates its sidecar; a SHA-256 hash of the PDF bytes, stored
 inside the sidecar, proves the sidecar belongs to it. Every save also records the
 page count and byte length.
 
+- **Reopening an annotated PDF** turns annotation mode on by itself, so your
+  marks are visible immediately without pressing **Annotate**. PDFs with no
+  annotations open in the plain native viewer as before. Turn this off with
+  *Open annotation mode automatically* in settings.
 - **Renaming or moving a PDF in Obsidian** moves its sidecars with it, including
   into a `.annotations` folder created in the destination directory.
 - **Replacing a PDF with different bytes** is detected on open. The plugin tells
