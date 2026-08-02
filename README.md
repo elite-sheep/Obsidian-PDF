@@ -7,9 +7,8 @@ Open a PDF normally, turn on **Annotate** in the native PDF toolbar, and work in
 the same Obsidian PDF view. The plugin does not replace Obsidian's PDF toolbar,
 thumbnail/sidebar area, zoom controls, or page navigation.
 
-Every PDF opened for annotation is protected by a managed, vault-local document
-bundle. The plugin stores a verified byte-for-byte PDF backup, its Markdown
-annotations, and identity metadata together. The working PDF is not modified.
+Annotations are saved as a plain Markdown sidecar next to the PDF, and the PDF
+itself is never modified or duplicated.
 
 ![Text selection popup with highlight, annotate, and copy actions](docs/screenshots/selection-popover.png)
 
@@ -75,52 +74,81 @@ is opt-in for fresh installs.
 
 ## Data Format
 
-The visible PDF path is not the document identity. Identity comes from a SHA-256
-hash of the PDF bytes, and the canonical bundle is stored at:
+Annotations live in a Markdown sidecar inside a hidden `.annotations` folder in
+the PDF's own directory, so nothing extra appears in the file explorer:
 
 ```text
-.pdf-annotator/bundles/sha256/<hash>/
-  document.pdf
-  annotations.md
-  annotations.previous.md
-  manifest.json
+Papers/consistent-gdr.pdf
+Papers/.annotations/consistent-gdr.annotations.md           # canonical
+Papers/.annotations/consistent-gdr.annotations.previous.md  # last-known-good copy
 ```
 
-`document.pdf` is a verified recovery copy. `annotations.md` is the canonical
-annotation sidecar, and `annotations.previous.md` is a rolling last-known-good
-copy used if a save is interrupted or corrupted. `manifest.json` records the
-current working path, previous path aliases, checksum, original filename,
-timestamps, and PDF fingerprint.
+The sidecar contains a readable Markdown summary and a fenced JSON block that is
+the machine-readable source of truth. `annotations.previous.md` is restored from
+if a save is interrupted or corrupted.
 
-The bundle is created the first time annotation mode opens for that PDF. This
-intentionally uses roughly one additional PDF's worth of vault storage in
-exchange for deletion recovery.
+Two other locations are available in settings:
 
-Moving or renaming a working PDF does not move the bundle and cannot disconnect
-its annotations. Replacing a PDF with different bytes at the same path creates a
-different bundle, so annotations cannot silently attach to the wrong document.
-Deleting the working copy leaves the bundle intact. Use **Restore a PDF from
-annotation backup** in the command palette to verify the checksum and restore a
-copy into `Recovered PDFs/`.
+| Setting | Sidecar for `Papers/x.pdf` |
+| --- | --- |
+| Hidden folder beside the PDF *(default)* | `Papers/.annotations/x.annotations.md` |
+| Visible, next to the PDF | `Papers/x.annotations.md` |
+| In one annotation folder | `PDF annotations/Papers/x.annotations.md` |
 
-Existing central or same-folder `<pdf-name>.annotations.md` sidecars are imported
-on first open. A unique PDF-fingerprint match can also recover a sidecar that was
-already orphaned by a rename. Legacy files are retained as recovery snapshots.
+Sidecars written under any of these are found and imported automatically, so
+switching is safe. When annotations are imported from one location into another,
+the file they came from is renamed to `.migrated.md` rather than deleted — it
+stays as a snapshot, but can no longer be mistaken for current state if you
+switch modes again later.
 
-The canonical sidecar contains a readable Markdown summary and a fenced JSON
-block that is used as the machine-readable source of truth. Use **Export
-annotations for current PDF** to create a user-visible snapshot under
-`PDF annotations/Exports/` (or the configured legacy annotation folder).
+Because hidden files are not part of Obsidian's index, sidecars in the default
+location do not appear in search or the graph, and some sync tools skip
+dot-folders. If yours does, include `.annotations` explicitly, or pick one of the
+visible locations.
+
+### How annotations stay attached to the right PDF
+
+The PDF's path locates its sidecar; a SHA-256 hash of the PDF bytes, stored
+inside the sidecar, proves the sidecar belongs to it. Every save also records the
+page count and byte length.
+
+- **Renaming or moving a PDF in Obsidian** moves its sidecars with it, including
+  into a `.annotations` folder created in the destination directory.
+- **Replacing a PDF with different bytes** is detected on open. The plugin tells
+  you the document changed, says whether the page count still matches, and lets
+  you keep the annotations, start fresh, or not open at all. Nothing is decided
+  for you, and "start fresh" renames the old sidecar to `.superseded.md` rather
+  than deleting it.
+- **Moving a PDF outside Obsidian**, where no rename event reaches the plugin,
+  is recovered from if the orphaned sidecar's hash or PDF fingerprint uniquely
+  identifies the document.
+- **Deleting a PDF** moves its sidecars to the trash along with it, following
+  your Obsidian deletion setting. This only ever happens in response to an
+  actual deletion — a PDF that is merely missing, for example during a partial
+  sync, never triggers it.
 
 Highlight geometry is stored in PDF user-space coordinates, so highlights and
-tags remain anchored across zoom changes.
+tags remain anchored across zoom changes — and stay correct when the same
+document is re-downloaded or re-saved with the same pagination.
 
-Use **Verify all PDF annotation backups** to checksum every managed recovery
-copy. Backups are also verified when created and periodically when their PDFs
-are opened. The managed library protects against moving, renaming, replacing,
-or deleting a working copy; it is still part of the same vault, so the vault
-itself should remain covered by iCloud, Obsidian Sync, or another backup system.
-If your sync tool excludes hidden folders, explicitly include `.pdf-annotator/`.
+Use **Export annotations for current PDF** to create a user-visible snapshot
+under `PDF annotations/Exports/`.
+
+The sidecars are ordinary files in your vault, so the vault itself should remain
+covered by iCloud, Obsidian Sync, or another backup system.
+
+### Upgrading from managed bundles
+
+Earlier versions kept a content-addressed bundle per document under
+`.pdf-annotator/bundles/sha256/<hash>/`, including a byte-for-byte copy of the
+PDF. Annotations still stored there are imported the first time you open the
+PDF. Two commands complete the move:
+
+1. **Migrate annotations out of managed bundles** — writes every remaining
+   bundle's annotations beside its PDF and reports anything it could not place.
+2. **Reclaim space from annotation backups** — deletes the duplicated PDF copies
+   after confirmation. It refuses to run while any bundle still holds
+   annotations, so the copies can never go before the annotations are out.
 
 ## Privacy
 

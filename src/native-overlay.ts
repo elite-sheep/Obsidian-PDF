@@ -46,13 +46,15 @@ import {
   legacySidecarPathFor,
   sidecarPathFor,
   type AnnotationPathOptions,
+  type AnnotationStoreOptions,
   type Highlight,
   type MarkStyle,
   type PdfRect,
 } from "./annotations";
 import { buildDocIndex, anchorQuote } from "./anchor";
 import { parseLegacyNote, targetBasename, type LegacyAnnotation } from "./legacy-import";
-import { PdfBundleManager } from "./bundles";
+import { DocumentBinder } from "./document-binding";
+import { resolveDocumentChange } from "./document-change";
 
 const MAX_HIGHLIGHT_ALPHA = 0.46;
 /** DOM that belongs to us; mutations inside it must not re-trigger syncing. */
@@ -135,7 +137,7 @@ export class NativeOverlayManager {
     private plugin: Plugin,
     private enabled: () => boolean,
     private getAnnotationPathOptions: () => AnnotationPathOptions,
-    private bundleManager?: PdfBundleManager
+    private binder?: DocumentBinder
   ) {}
 
   private get app(): App {
@@ -209,12 +211,17 @@ export class NativeOverlayManager {
       leaf,
       file,
       this.getAnnotationPathOptions,
-      this.bundleManager
+      this.binder
     );
     this.overlays.set(leaf, overlay);
     this.refresh();
     try {
       await overlay.init();
+      // init() self-destructs when the user declines to open annotation mode
+      // for a changed PDF; drop it so the toggle does not read as active.
+      if (overlay.isDestroyed && this.overlays.get(leaf) === overlay) {
+        this.overlays.delete(leaf);
+      }
     } catch (e) {
       if (!overlay.isDestroyed) {
         console.error(`${LOG_TAG} native overlay attach failed`, e);
@@ -226,8 +233,8 @@ export class NativeOverlayManager {
     this.refresh();
   }
 
-  syncPdfPath(file: TFile): void {
-    for (const overlay of this.overlays.values()) overlay.syncPdfPath(file);
+  syncPdfPath(file: TFile, sidecar?: { sidecarPath: string; sidecarBackupPath: string }): void {
+    for (const overlay of this.overlays.values()) overlay.syncPdfPath(file, sidecar);
   }
 
   /** Inject/sync the control group in one native PDF leaf. False if no bar yet. */
@@ -350,7 +357,7 @@ export class NativePdfOverlay {
     private leaf: WorkspaceLeaf,
     readonly file: TFile,
     private getAnnotationPathOptions: () => AnnotationPathOptions,
-    private bundleManager?: PdfBundleManager
+    private binder?: DocumentBinder
   ) {}
 
   private get app(): App {
@@ -384,27 +391,37 @@ export class NativePdfOverlay {
       ? this.pdfDoc.fingerprints[0]
       : this.pdfDoc.fingerprint;
     const pathOptions = this.getAnnotationPathOptions();
-    let annotationPath = sidecarPathFor(this.file.path, pathOptions);
-    let fallbackPaths = [legacySidecarPathFor(this.file.path)];
-    let migrateFallback = false;
-    let annotationBackupPath: string | undefined;
-    if (this.bundleManager) {
-      const binding = await this.bundleManager.prepare(this.file, data, fingerprint, pathOptions);
-      annotationPath = binding.annotationPath;
-      fallbackPaths = binding.fallbackAnnotationPaths;
-      migrateFallback = true;
-      annotationBackupPath = binding.annotationBackupPath;
-    }
-    this.store = new AnnotationStore(
-      this.app.vault.adapter,
-      annotationPath,
-      this.file.basename,
-      this.file.path,
+    let storeOptions: AnnotationStoreOptions = {
+      adapter: this.app.vault.adapter,
+      sidecarPath: sidecarPathFor(this.file.path, pathOptions),
+      pdfBasename: this.file.basename,
+      pdfVaultPath: this.file.path,
       fingerprint,
-      fallbackPaths,
-      migrateFallback,
-      annotationBackupPath
-    );
+      loadFallbackPaths: [legacySidecarPathFor(this.file.path)],
+    };
+    if (this.binder) {
+      const binding = await this.binder.prepare(this.file, data, {
+        fingerprint,
+        pageCount: this.pdfDoc.numPages,
+        pathOptions,
+      });
+      // The PDF may no longer be the one these annotations describe; only the
+      // user can settle that (see document-change.ts).
+      if (!(await resolveDocumentChange(this.app, this.file, binding))) {
+        this.destroy();
+        return;
+      }
+      if (this.destroyed) return;
+      storeOptions = {
+        ...storeOptions,
+        sidecarPath: binding.sidecarPath,
+        loadFallbackPaths: binding.fallbackPaths,
+        migrateFallbackOnLoad: true,
+        sidecarBackupPath: binding.sidecarBackupPath,
+        document: binding.document,
+      };
+    }
+    this.store = new AnnotationStore(storeOptions);
     await this.store.load();
     if (this.destroyed) return;
     this.notifyStoreChanged();
@@ -434,8 +451,10 @@ export class NativePdfOverlay {
     console.log(`${LOG_TAG} native annotation overlay attached: ${this.file.path}`);
   }
 
-  syncPdfPath(file: TFile): void {
+  /** Follow a vault rename. `sidecar` is set once the files have been moved. */
+  syncPdfPath(file: TFile, sidecar?: { sidecarPath: string; sidecarBackupPath: string }): void {
     if (this.file !== file && this.file.path !== file.path) return;
+    if (sidecar) this.store?.setSidecarPaths(sidecar.sidecarPath, sidecar.sidecarBackupPath);
     this.store?.setPdfPath(file.path, file.basename);
   }
 
