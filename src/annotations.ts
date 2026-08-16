@@ -138,18 +138,19 @@ export interface PaletteEntry {
   highlightAlpha?: number; // optional painted alpha for marker-like fills
 }
 
+/**
+ * Each entry is one accent colour serving both roles: opaque as `ink` (the
+ * stroke for underline/box/strike styles, tag accents, list rails) and washed
+ * back by `highlightAlpha` as a fill. These are darker and more saturated than
+ * the marker-like fills they replaced, so each carries an explicit alpha rather
+ * than taking MAX_HIGHLIGHT_ALPHA — at the renderer's 0.46 cap they would sit
+ * heavily enough over body text to cost legibility.
+ */
 export const PALETTE: PaletteEntry[] = [
-  {
-    name: "yellow",
-    fill: "#FBF719",
-    ink: "rgba(190, 135, 0, 0.96)",
-    emoji: "🟨",
-    cardFill: "rgba(255, 224, 46, 0.52)",
-    highlightAlpha: 0.52,
-  },
-  { name: "blue", fill: "rgba(72, 158, 255, 0.42)", ink: "rgba(28, 104, 196, 0.96)", emoji: "🟦" },
-  { name: "pink", fill: "rgba(255, 76, 174, 0.46)", ink: "rgba(202, 32, 122, 0.96)", emoji: "🟪" },
-  { name: "red", fill: "rgba(246, 94, 82, 0.44)", ink: "rgba(188, 54, 45, 0.96)", emoji: "🟥" },
+  { name: "yellow", fill: "#df8e1d", ink: "rgba(223, 142, 29, 0.96)", emoji: "🟨", highlightAlpha: 0.38 },
+  { name: "blue", fill: "#1e66f5", ink: "rgba(30, 102, 245, 0.96)", emoji: "🟦", highlightAlpha: 0.3 },
+  { name: "mauve", fill: "#8839ef", ink: "rgba(136, 57, 239, 0.96)", emoji: "🟪", highlightAlpha: 0.3 },
+  { name: "red", fill: "#e64553", ink: "rgba(230, 69, 83, 0.96)", emoji: "🟥", highlightAlpha: 0.32 },
 ];
 
 /** name → fill, kept for any code that wants the simple map. */
@@ -170,8 +171,17 @@ const LEGACY_FILL_TO_NAME: Record<string, string> = {
   "rgba(106, 217, 126, 0.42)": "blue",
   "rgba(124, 178, 122, 0.42)": "blue",
   "rgba(90, 170, 255, 0.40)": "blue",
-  "rgba(255, 130, 200, 0.42)": "pink",
   "rgba(255, 110, 110, 0.42)": "red",
+  // The marker-like palette these accent colours replaced. Every mark written
+  // before the change still stores one of these strings, and we never rewrite
+  // stored colours — so without these four lines all existing annotations would
+  // resolve to null and lose their ink, emoji, and painted alpha.
+  "#FBF719": "yellow",
+  "rgba(72, 158, 255, 0.42)": "blue",
+  "rgba(255, 76, 174, 0.46)": "mauve",
+  "rgba(246, 94, 82, 0.44)": "red",
+  // "pink" became "mauve"; its stored fills must follow the rename.
+  "rgba(255, 130, 200, 0.42)": "mauve",
 };
 
 /**
