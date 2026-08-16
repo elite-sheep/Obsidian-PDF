@@ -29,6 +29,7 @@ import {
   type MarkStyle,
   type PdfRect,
 } from "./annotations";
+import { FLASH_MS } from "./annotation-list";
 import { buildDocIndex, anchorQuote } from "./anchor";
 import { parseLegacyNote, targetBasename, type LegacyAnnotation } from "./legacy-import";
 import { DocumentBinder } from "./document-binding";
@@ -160,6 +161,8 @@ export class PdfAnnotatorView extends FileView {
   private renderEpoch = 0;
   private loadToken = 0;
   private activeHighlightId: string | null = null;
+  private flashTimer: number | null = null;
+  private flashedEls: HTMLElement[] = [];
   private hoverHighlightId: string | null = null;
   private tagPlacementMode = false;
   private rollOpen = false;
@@ -1776,14 +1779,39 @@ export class PdfAnnotatorView extends FileView {
     if (!pv) return;
     pv.el.scrollIntoView({ block: "center" });
     await this.renderPageContent(pv);
-    const div = annotationTypeOf(h) === "tag"
-      ? pv.noteLayer.querySelector<HTMLElement>(`.lpa-page-tag[data-hl-id="${cssEscape(id)}"]`)
-      : Array.from(pv.hlLayer.querySelectorAll<HTMLElement>(".lpa-highlight"))
-        .find((el) => (el.dataset.hlIds ?? "").split(/\s+/).includes(id));
-    if (div) {
+    // Every rect of the passage, so a multi-line highlight flashes as one
+    // sentence rather than just its first line.
+    const els =
+      annotationTypeOf(h) === "tag"
+        ? Array.from(
+            pv.noteLayer.querySelectorAll<HTMLElement>(`.lpa-page-tag[data-hl-id="${cssEscape(id)}"]`)
+          )
+        : Array.from(pv.hlLayer.querySelectorAll<HTMLElement>(".lpa-highlight")).filter((el) =>
+            (el.dataset.hlIds ?? "").split(/\s+/).includes(id)
+          );
+    // Cancel any flash still in flight, or its timer fires partway through
+    // this one and truncates it — the repeat-click case this exists to serve.
+    this.clearFlash();
+    this.flashedEls = els;
+    for (const div of els) {
+      // Drop the class and force a reflow, or re-adding it in the same frame
+      // is a no-op and the animation never replays.
+      div.removeClass("lpa-flash");
+      void div.offsetWidth;
       div.addClass("lpa-flash");
-      window.setTimeout(() => div.removeClass("lpa-flash"), 1200);
     }
+    this.flashTimer = window.setTimeout(() => {
+      this.flashTimer = null;
+      this.clearFlash();
+    }, FLASH_MS);
+  }
+
+  private clearFlash(): void {
+    if (this.flashTimer !== null) {
+      window.clearTimeout(this.flashTimer);
+      this.flashTimer = null;
+    }
+    for (const el of this.flashedEls.splice(0)) el.removeClass("lpa-flash");
   }
 
   private toggleAnnotationPin(id: string): void {
@@ -2449,6 +2477,7 @@ export class PdfAnnotatorView extends FileView {
     this.closeMarkPopover();
     this.hideSelectionActions(false);
     this.setTagPlacementMode(false);
+    this.clearFlash();
     if (this.marginLayoutRaf !== null) {
       window.cancelAnimationFrame(this.marginLayoutRaf);
       this.marginLayoutRaf = null;

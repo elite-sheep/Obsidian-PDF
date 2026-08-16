@@ -12,6 +12,14 @@ const tests = [
     entry: "test/document-binding-smoke.ts",
     alias: { obsidian: path.join(root, "test/obsidian-stub.ts") },
   },
+  {
+    entry: "test/annotation-list-smoke.ts",
+    alias: { obsidian: path.join(root, "test/obsidian-stub.ts") },
+  },
+  {
+    entry: "test/palette-smoke.ts",
+    alias: { obsidian: path.join(root, "test/obsidian-stub.ts") },
+  },
 ];
 
 try {

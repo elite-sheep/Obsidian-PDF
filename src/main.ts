@@ -27,6 +27,7 @@ import {
   type AnnotationPathOptions,
   type AnnotationStorageMode,
 } from "./annotations";
+import type { AnnotationListLocation } from "./annotation-list";
 import { DocumentBinder } from "./document-binding";
 
 interface LpaSettings {
@@ -36,6 +37,8 @@ interface LpaSettings {
   enableNativeOverlay: boolean;
   /** Turn annotation mode on by itself for PDFs that already have marks. */
   autoEnableAnnotationMode: boolean;
+  /** Where the annotation list opens: the native PDF sidebar, or a panel. */
+  annotationListLocation: AnnotationListLocation;
   /** Where sidecars live: beside each PDF, or mirrored under one folder. */
   annotationStorageMode: AnnotationStorageMode;
   /** Vault-relative folder used by "folder" mode and for exports. */
@@ -46,12 +49,20 @@ const DEFAULT_SETTINGS: LpaSettings = {
   registerAsDefaultPdfHandler: false,
   enableNativeOverlay: true,
   autoEnableAnnotationMode: true,
+  // Beside Thumbnails and Outline, which is where a reader looks for it. Falls
+  // back to the floating panel by itself when that sidebar isn't there.
+  annotationListLocation: "sidebar",
   // A ".annotations" folder in the PDF's own directory: same locality as the
   // PDF (a folder moved in Finder takes both), without a stray Markdown file
   // appearing in the file explorer next to every paper.
   annotationStorageMode: "hidden-beside",
   annotationStorageFolder: DEFAULT_ANNOTATION_FOLDER,
 };
+
+/** Sidecar settings written by an older build carry no value at all. */
+function coerceAnnotationListLocation(value: string | undefined): AnnotationListLocation {
+  return value === "floating" ? "floating" : "sidebar";
+}
 
 function coerceAnnotationStorageMode(value: string): AnnotationStorageMode {
   if (value === "folder") return "folder";
@@ -88,6 +99,7 @@ export default class LocalPdfAnnotatorPlugin extends Plugin {
       () => this.settings.enableNativeOverlay,
       () => this.settings.autoEnableAnnotationMode,
       () => this.annotationPathOptions(),
+      () => coerceAnnotationListLocation(this.settings.annotationListLocation),
       this.binder
     );
 
@@ -541,6 +553,26 @@ class LpaSettingTab extends PluginSettingTab {
           this.plugin.settings.autoEnableAnnotationMode = v;
           await this.plugin.saveSettings();
         })
+      );
+
+    new Setting(containerEl)
+      .setName("Annotation list location")
+      .setDesc(
+        "Where the annotation list opens from the toolbar's list button. In the sidebar it " +
+          "appears beside Obsidian's own Thumbnails and Outline views, and yields as soon as " +
+          "you pick one of those. Falls back to the floating panel where there is no sidebar."
+      )
+      .addDropdown((d) =>
+        d
+          .addOption("sidebar", "In the PDF sidebar")
+          .addOption("floating", "Floating panel")
+          .setValue(coerceAnnotationListLocation(this.plugin.settings.annotationListLocation))
+          .onChange(async (v) => {
+            this.plugin.settings.annotationListLocation = coerceAnnotationListLocation(v);
+            await this.plugin.saveSettings();
+            // Re-home an already-open list instead of leaving it where it was.
+            this.plugin.nativeOverlays.relocateLists();
+          })
       );
 
     new Setting(containerEl)
