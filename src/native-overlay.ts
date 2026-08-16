@@ -69,7 +69,6 @@ import {
   sortForList,
   tagPreview,
   widthBandFor,
-  type AnnotationListLocation,
   type ListWidthBand,
 } from "./annotation-list";
 import { buildDocIndex, anchorQuote } from "./anchor";
@@ -80,7 +79,7 @@ import { resolveDocumentChange } from "./document-change";
 const MAX_HIGHLIGHT_ALPHA = 0.46;
 /** DOM that belongs to us; mutations inside it must not re-trigger syncing. */
 const OWN_DOM_SELECTOR =
-  ".lpa-native-hl-layer, .lpa-native-note-layer, .lpa-native-reveal-layer, .lpa-native-roll, .lpa-native-sidebar-view, .lpa-native-controls";
+  ".lpa-native-hl-layer, .lpa-native-note-layer, .lpa-native-reveal-layer, .lpa-native-sidebar-view, .lpa-native-controls";
 /** Marks the native sidebar as currently showing our annotation list. */
 const SIDEBAR_MARKER_CLASS = "lpa-annotations-view";
 /**
@@ -145,7 +144,6 @@ export class NativeOverlayManager {
     private enabled: () => boolean,
     private autoEnable: () => boolean,
     private getAnnotationPathOptions: () => AnnotationPathOptions,
-    private getListLocation: () => AnnotationListLocation,
     private binder?: DocumentBinder
   ) {}
 
@@ -279,7 +277,6 @@ export class NativeOverlayManager {
       leaf,
       file,
       this.getAnnotationPathOptions,
-      this.getListLocation,
       this.binder
     );
     this.overlays.set(leaf, overlay);
@@ -304,11 +301,6 @@ export class NativeOverlayManager {
 
   syncPdfPath(file: TFile, sidecar?: { sidecarPath: string; sidecarBackupPath: string }): void {
     for (const overlay of this.overlays.values()) overlay.syncPdfPath(file, sidecar);
-  }
-
-  /** The "where does the list live" setting changed; re-home any open list. */
-  relocateLists(): void {
-    for (const overlay of this.overlays.values()) overlay.relocateList();
   }
 
   /** Inject/sync the control group in one native PDF leaf. False if no bar yet. */
@@ -406,8 +398,6 @@ export class NativePdfOverlay {
   private tagBtn: HTMLButtonElement | null = null;
   private listBtn: HTMLButtonElement | null = null;
   private countEl: HTMLElement | null = null;
-  private listPanel: AnnotationListPanel | null = null;
-  private listHostEl: HTMLElement | null = null;
   private listSearchQuery = "";
 
   // Annotation list hosted in Obsidian's native PDF sidebar.
@@ -430,22 +420,11 @@ export class NativePdfOverlay {
     private leaf: WorkspaceLeaf,
     readonly file: TFile,
     private getAnnotationPathOptions: () => AnnotationPathOptions,
-    private getListLocation: () => AnnotationListLocation,
     private binder?: DocumentBinder
   ) {}
 
   private get app(): App {
     return this.plugin.app;
-  }
-
-  /**
-   * Move an open list to the host the setting now names. Closing first matters:
-   * re-homing must never leave the list showing in both places.
-   */
-  relocateList(): void {
-    if (this.destroyed || !this.isListOpen()) return;
-    this.closeList();
-    this.openList();
   }
 
   get isDestroyed(): boolean {
@@ -549,7 +528,6 @@ export class NativePdfOverlay {
     this.selectionPopoverEl?.remove();
     this.selectionPopoverEl = null;
     this.pendingSelection = null;
-    this.closeFloatingList();
     this.teardownSidebarList();
     this.contentRoot?.removeClass("lpa-native-tag-mode");
 
@@ -995,7 +973,7 @@ export class NativePdfOverlay {
   private onMouseUp(evt: MouseEvent): void {
     if (this.destroyed || !this.store || this.tagMode) return;
     const target = evt.target as HTMLElement | null;
-    if (target?.closest(".lpa-selection-popover, .lpa-mark-popover, .lpa-native-controls, .lpa-native-roll, .lpa-native-sidebar-view")) return;
+    if (target?.closest(".lpa-selection-popover, .lpa-mark-popover, .lpa-native-controls, .lpa-native-sidebar-view")) return;
     const sel = this.contentRoot?.ownerDocument.getSelection();
     if (sel && !sel.isCollapsed && sel.toString().trim().length > 0) {
       void this.captureSelection(sel, evt.clientX, evt.clientY);
@@ -1167,7 +1145,7 @@ export class NativePdfOverlay {
     const target = evt.target as HTMLElement | null;
     if (
       target?.closest(
-        ".pdf-toolbar, .pdf-sidebar-container, .lpa-page-tag, .lpa-native-controls, .lpa-native-roll, .lpa-native-sidebar-view, .lpa-mark-popover, .lpa-selection-popover"
+        ".pdf-toolbar, .pdf-sidebar-container, .lpa-page-tag, .lpa-native-controls, .lpa-native-sidebar-view, .lpa-mark-popover, .lpa-selection-popover"
       )
     ) {
       return;
@@ -1406,7 +1384,7 @@ export class NativePdfOverlay {
     const target = evt.target as HTMLElement | null;
     if (
       target?.closest(
-        ".lpa-native-roll, .lpa-native-sidebar-view, .lpa-native-controls, .lpa-mark-popover, .lpa-selection-popover, .lpa-page-tag"
+        ".lpa-native-sidebar-view, .lpa-native-controls, .lpa-mark-popover, .lpa-selection-popover, .lpa-page-tag"
       )
     ) {
       return;
@@ -1496,15 +1474,12 @@ export class NativePdfOverlay {
 
   // ---- annotation list ---------------------------------------------------------
   //
-  // Two hosts, one renderer (AnnotationListPanel):
-  //   1. Obsidian's native PDF sidebar, as a third view beside Thumbnails and
-  //      Outline. Preferred, because that is where a reader looks for it.
-  //   2. A floating panel over the viewer. Used when the setting asks for it,
-  //      and as the fallback when the native sidebar DOM isn't there at all
-  //      (PDF embeds, or Obsidian renaming those classes on us).
+  // One home: Obsidian's native PDF sidebar, as a third view beside Thumbnails
+  // and Outline. That is where a reader looks for it, and where it can be
+  // resized and scrolled by controls the user already knows.
 
   private isListOpen(): boolean {
-    return this.sidebarListActive || !!this.listPanel;
+    return this.sidebarListActive;
   }
 
   private toggleList(): void {
@@ -1514,61 +1489,34 @@ export class NativePdfOverlay {
 
   private openList(): void {
     if (this.destroyed || !this.store) return;
-    if (this.preferSidebarList() && this.setSidebarListActive(true)) return;
-    this.openFloatingList();
+    if (this.setSidebarListActive(true)) return;
+    // No native sidebar to host it — a PDF embed, or Obsidian having renamed
+    // those classes. Say so rather than leaving a dead toolbar button.
+    new Notice("PDF Annotator: this view has no PDF sidebar to show the annotation list in.");
   }
 
   private closeList(): void {
     this.setSidebarListActive(false);
-    this.closeFloatingList();
   }
 
   private renderListItems(): void {
     const store = this.store;
-    if (!store) return;
-    if (this.sidebarListActive) this.sidebarPanel?.render(store.doc.highlights);
-    this.listPanel?.render(store.doc.highlights);
+    if (!store || !this.sidebarListActive) return;
+    this.sidebarPanel?.render(store.doc.highlights);
   }
 
-  private listPanelOptions(showChrome: boolean): AnnotationListPanelOptions {
+  private listPanelOptions(): AnnotationListPanelOptions {
     return {
-      showChrome,
       query: this.listSearchQuery,
       onQueryChange: (q) => {
         this.listSearchQuery = q;
       },
       onReveal: (id) => void this.revealAnnotation(id),
-      onClose: () => this.closeList(),
       accentFor: (h) => resolvePalette(annotationColor(h))?.ink ?? markInkColor(annotationColor(h)),
     };
   }
 
-  // ---- the floating fallback panel ---------------------------------------------
-
-  private openFloatingList(): void {
-    if (this.listPanel) return;
-    const root = this.contentRoot;
-    if (!root || !this.store) return;
-    this.listHostEl = root.createDiv({ cls: "lpa-native-roll" });
-    this.listPanel = new AnnotationListPanel(this.listHostEl, this.listPanelOptions(true));
-    this.renderListItems();
-    this.syncToolbarState();
-  }
-
-  private closeFloatingList(): void {
-    this.listPanel?.destroy();
-    this.listPanel = null;
-    this.listHostEl?.remove();
-    this.listHostEl = null;
-    this.syncToolbarState();
-  }
-
   // ---- the native sidebar view -------------------------------------------------
-
-  /** Whether the list should try the native sidebar before the floating panel. */
-  private preferSidebarList(): boolean {
-    return this.getListLocation() === "sidebar";
-  }
 
   /**
    * Obsidian builds the native sidebar as
@@ -1603,7 +1551,7 @@ export class NativePdfOverlay {
 
     const view = host.createDiv({ cls: "lpa-native-sidebar-view" });
     this.sidebarViewEl = view;
-    this.sidebarPanel = new AnnotationListPanel(view, this.listPanelOptions(false));
+    this.sidebarPanel = new AnnotationListPanel(view, this.listPanelOptions());
     return view;
   }
 
@@ -1620,8 +1568,8 @@ export class NativePdfOverlay {
     const container = this.sidebarContainerEl();
     if (!container || !this.ensureSidebarView()) return false;
     // pdf.js opens synchronously inside the click, so this reads the result
-    // rather than a hope. Refusing here hands the caller back to the floating
-    // panel instead of leaving the button pressed over a closed sidebar.
+    // rather than a hope. Refusing here means openList() reports the failure
+    // instead of leaving the toolbar button pressed over a closed sidebar.
     if (!this.openNativeSidebar()) return false;
     container.addClass(SIDEBAR_MARKER_CLASS);
     this.sidebarListActive = true;
@@ -1642,10 +1590,10 @@ export class NativePdfOverlay {
     if (this.destroyed || !this.sidebarListActive) return;
     const container = this.sidebarContainerEl();
     if (!container) {
-      // The sidebar itself is gone; fall back rather than lose the list.
+      // The sidebar itself is gone (a rebuild we lost, or a PDF embed). Drop
+      // the list rather than leave the toolbar button reading as pressed.
       this.sidebarListActive = false;
       this.syncToolbarState();
-      this.openFloatingList();
       return;
     }
     if (this.sidebarViewEl?.isConnected && this.sidebarPanel) {
@@ -2229,20 +2177,22 @@ function clamp(min: number, value: number, max: number): number {
 
 interface AnnotationListPanelOptions {
   /** Title + close row. The floating panel needs it; the sidebar has its own. */
-  showChrome: boolean;
   query?: string;
   onQueryChange?: (query: string) => void;
   onReveal: (id: string) => void;
-  onClose?: () => void;
   /** Colour machinery lives in the overlay; the panel just paints what it gets. */
   accentFor: (h: Highlight) => string;
 }
 
 /**
- * The annotation list, rendered into whatever host it is handed: Obsidian's
- * native PDF sidebar or our floating fallback panel. One renderer for both, so
- * the two surfaces cannot drift in what they show — the same reason the
- * document-change decision lives in one module.
+ * The annotation list, rendered into the host it is handed — currently the
+ * view we inject into Obsidian's native PDF sidebar. It is kept host-agnostic
+ * (it takes an element and callbacks, and reaches for nothing outside its own
+ * subtree) so the sidebar stays a placement decision rather than a fact baked
+ * through the renderer.
+ *
+ * There is no title bar or close button: the sidebar already frames it, and
+ * closing it is the toolbar toggle's job.
  *
  * The panel never asks for a width. The native sidebar's width is owned by a
  * pdf.js drag handle (private field, persisted view state) that would overwrite
@@ -2263,20 +2213,7 @@ class AnnotationListPanel {
     this.query = opts.query ?? "";
     this.rootEl = host.createDiv({ cls: "lpa-annlist" });
 
-    if (opts.showChrome) {
-      const head = this.rootEl.createDiv({ cls: "lpa-annlist-head" });
-      head.createSpan({ cls: "lpa-annlist-title", text: "Annotations" });
-      this.metaEl = head.createSpan({ cls: "lpa-annlist-meta", text: "" });
-      const close = head.createEl("button", {
-        cls: "lpa-annlist-close",
-        text: "×",
-        attr: { type: "button", "aria-label": "Hide annotations" },
-      });
-      close.onclick = () => this.opts.onClose?.();
-    } else {
-      // Without the chrome row the count still needs somewhere to live.
-      this.metaEl = this.rootEl.createDiv({ cls: "lpa-annlist-meta lpa-annlist-meta-bare" });
-    }
+    this.metaEl = this.rootEl.createDiv({ cls: "lpa-annlist-meta" });
 
     this.searchEl = this.rootEl.createEl("input", {
       cls: "lpa-annlist-search",

@@ -5,11 +5,10 @@
  *
  * This is deliberately DOM-free and Obsidian-free (it only imports the
  * `Highlight` shape and the mark-style labels from annotations.ts) for the same
- * reason `pdf-bytes.ts` / `anchor.ts` are: the list is rendered into two very
- * different hosts — Obsidian's native PDF sidebar and our own floating panel —
- * and the rules for *what* to show must not fork between them. Keeping them
- * here also makes them the only part of the list that can be unit-tested
- * headlessly (see test/annotation-list-smoke.ts).
+ * reason `pdf-bytes.ts` / `anchor.ts` are: it is the only part of the list that
+ * can then be unit-tested headlessly (see test/annotation-list-smoke.ts), and
+ * keeping the *rules* out of the renderer keeps the sidebar a placement
+ * decision rather than something baked through the whole feature.
  *
  * Search is intentionally simple: fold case and collapse whitespace, then
  * require every space-separated term to appear somewhere in one joined haystack
@@ -22,12 +21,6 @@
 import { MARK_STYLE_LABELS, markStyleOf, type Highlight } from "./annotations";
 
 /**
- * How much horizontal room the list has. The native PDF sidebar starts at
- * 140px and is resized by a native drag handle we must not fight (its width
- * lives in a private pdf.js field and is persisted view state), so the list
- * adapts to the width it is given instead of asking for one.
- */
-/**
  * How long the reveal bounce runs when a list entry is clicked. Both annotation
  * surfaces schedule the class removal off this, and it MUST match the
  * `lpa-flash` / `lpa-tag-flash` animation durations in styles.css — a shorter
@@ -35,14 +28,13 @@ import { MARK_STYLE_LABELS, markStyleOf, type Highlight } from "./annotations";
  */
 export const FLASH_MS = 1000;
 
-export type ListWidthBand = "tight" | "compact" | "roomy";
-
 /**
- * Where the list is rendered. `"sidebar"` is a preference, not a guarantee —
- * it degrades to `"floating"` whenever Obsidian's native sidebar DOM isn't
- * present (PDF embeds, or those class names changing under us).
+ * How much horizontal room the list has. The native PDF sidebar starts at
+ * 140px and is resized by a native drag handle we must not fight (its width
+ * lives in a private pdf.js field and is persisted view state), so the list
+ * adapts to the width it is given instead of asking for one.
  */
-export type AnnotationListLocation = "sidebar" | "floating";
+export type ListWidthBand = "tight" | "compact" | "roomy";
 
 /** Below this, only a page badge and one clamped line of text fit. */
 export const LIST_COMPACT_MIN_WIDTH = 160;

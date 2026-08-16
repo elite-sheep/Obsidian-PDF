@@ -229,24 +229,11 @@
   border-color: color-mix(in srgb, var(--interactive-accent) 55%, var(--background-modifier-border));
 }
 
-/* Annotation list. One renderer (.lpa-annlist), two hosts: the floating panel
-   below, and the native PDF sidebar further down. */
+/* Annotation list, hosted in the native PDF sidebar (see the view rules further
+   down). The renderer is kept host-agnostic, so these rules describe the list
+   itself and only the block below places it. */
 .workspace-leaf-content[data-type="pdf"] .view-content {
   position: relative;
-}
-.lpa-native-roll {
-  position: absolute;
-  top: 44px;
-  right: 12px;
-  z-index: 40;
-  display: flex;
-  width: 300px;
-  max-height: min(440px, 72%);
-  padding: 8px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 10px;
-  background: var(--background-primary);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
 }
 .lpa-annlist {
   display: flex;
@@ -256,37 +243,11 @@
   min-height: 0;
   gap: 6px;
 }
-.lpa-annlist-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.lpa-annlist-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-normal);
-}
 .lpa-annlist-meta {
-  flex: 1;
+  flex: 0 0 auto;
   font-size: 11px;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
-}
-.lpa-annlist-close {
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 14px;
-  line-height: 1;
-  cursor: pointer;
-}
-.lpa-annlist-close:hover {
-  color: var(--text-normal);
-  background: var(--background-modifier-hover);
 }
 .lpa-annlist-search {
   width: 100%;
@@ -371,8 +332,7 @@
 .lpa-native-sidebar-view .lpa-annlist {
   gap: 5px;
 }
-.lpa-native-sidebar-view .lpa-annlist-meta-bare {
-  flex: 0 0 auto;
+.lpa-native-sidebar-view .lpa-annlist-meta {
   padding: 0 2px;
   font-size: 10px;
   text-transform: uppercase;

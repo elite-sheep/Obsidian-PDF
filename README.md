@@ -49,9 +49,8 @@ Picking Thumbnails or Outline, or closing the sidebar, hands the sidebar straigh
 back to Obsidian. The sidebar's own drag handle sets the width, and the list
 adapts to it: narrow shows one line per entry, wider adds the quoted source text.
 
-Prefer a panel over the page instead? Set *Annotation list location* to
-**Floating panel** in settings. The floating panel is also used automatically
-wherever there is no PDF sidebar to use.
+Clicking an entry scrolls the mark into view and draws a box around it that
+bounces for a second, so you can see where you landed.
 
 ## Fallback Annotator View
 
